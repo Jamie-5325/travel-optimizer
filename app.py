@@ -98,7 +98,8 @@ async def fetch_flights_async(client, origin, destination, date):
                 "duration": f.get("total_duration", 0) / 60.0
             })
         return validate_flights(parsed)
-    except Exception:
+    except Exception as e:
+        st.error(f"항공 API 에러: {e}")
         return []
 
 async def fetch_hotels_async(client, destination, check_in, check_out):
@@ -126,7 +127,8 @@ async def fetch_hotels_async(client, destination, check_in, check_out):
                 "rating": p.get("overall_rating", 3.0)
             })
         return validate_hotels(parsed)
-    except Exception:
+    except Exception as e:
+        st.error(f"숙박 API 에러: {e}")
         return []
 
 async def fetch_all_data(origin, destination, check_in, check_out):
