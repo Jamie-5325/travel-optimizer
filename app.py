@@ -111,7 +111,7 @@ async def fetch_hotels_async(client, destination, check_in, check_out):
         "check_out_date": check_out,
         "currency": "KRW",
         "hl": "ko",
-        "api_key": SERPAPI_KEY
+        "api_key": "0dd9533f83ac0823563e1edefb64ed54344c3f28ae6aee84c8779dfa8017133f"
         
     try:
         response = await client.get(url, params=params, timeout=15.0)
