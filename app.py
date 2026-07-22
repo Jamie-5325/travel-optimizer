@@ -527,6 +527,64 @@ def location_picker(label: str, state_key: str, default: str) -> str:
     return st.session_state[state_key]
 
 
+# 한국 출발 기준 대략적인 근접 권역 분류(비행시간 휴리스틱).
+# "여행지 추천받기"의 접근성 점수 계산에만 쓰이는 참고용 분류다.
+NEARBY_ASIA_COUNTRIES = {
+    "Japan", "Taiwan", "Hong Kong", "Macau", "Macao", "China",
+    "Vietnam", "Thailand", "Philippines", "Singapore", "Malaysia",
+    "Cambodia", "Laos", "Mongolia", "Brunei",
+}
+MID_RANGE_COUNTRIES = {
+    "Guam", "Northern Mariana Islands", "Indonesia", "India",
+    "United Arab Emirates", "Qatar", "Turkey", "Türkiye",
+    "Australia", "New Zealand", "Sri Lanka", "Nepal", "Maldives",
+}
+# 그 외 국가(유럽/미주/아프리카 등)는 장거리로 취급한다.
+
+# 한국 여권 기준 대부분의 여행 목적에서 무비자(또는 도착비자/사전 온라인
+# 허가만으로) 입국 가능한 국가 목록(참고용, 대략적 스냅샷).
+# ⚠️ 비자 요건은 양국 협정에 따라 수시로 바뀔 수 있어 점수 계산용
+# 참고 자료일 뿐, 실제 출입국 요건은 반드시 외교부/대사관에서 재확인해야 한다.
+VISA_FREE_FOR_KOREAN_PASSPORT = {
+    "Japan", "Taiwan", "Hong Kong", "Macau", "Macao",
+    "Thailand", "Vietnam", "Philippines", "Singapore", "Malaysia",
+    "Cambodia", "Laos", "Indonesia", "Mongolia",
+    "France", "Germany", "Italy", "Spain", "Portugal", "Netherlands",
+    "Belgium", "Switzerland", "Austria", "Greece", "United Kingdom",
+    "Ireland", "Sweden", "Norway", "Denmark", "Finland", "Iceland",
+    "Czechia", "Czech Republic", "Poland", "Hungary", "Croatia",
+    "United States", "Canada", "Mexico", "Australia", "New Zealand",
+    "United Arab Emirates", "Qatar", "Turkey", "Türkiye",
+}
+
+
+def korea_travel_score(country: str, total_price: int, budget: int) -> dict:
+    """
+    '예산으로 여행지 추천받기'의 점수 체계 — 한국 출발 여행자에 특화된
+    가중치로 재설계했다. 세 요소를 조합한다:
+    - 예산 활용도(35%): 예산 한도 안에서 예산에 가까울수록 높음
+    - 접근성(45%): 근거리 아시아를 가장 높게 쳐준다. 한국인 해외여행객의
+      압도적 다수가 일본/동남아 등 단거리 아시아 국가에 몰리는 실제 여행
+      패턴을 반영해, 세 요소 중 가장 큰 비중을 뒀다.
+    - 무비자 여부(20%): 한국 여권으로 무비자 입국 가능하면 가점
+    """
+    budget_fit = (total_price / budget) if budget else 0.0
+
+    if country in NEARBY_ASIA_COUNTRIES:
+        proximity, proximity_label = 1.0, "근거리(아시아)"
+    elif country in MID_RANGE_COUNTRIES:
+        proximity, proximity_label = 0.55, "중거리"
+    else:
+        proximity, proximity_label = 0.2, "장거리"
+
+    visa_free = country in VISA_FREE_FOR_KOREAN_PASSPORT
+
+    w_budget, w_proximity, w_visa = 0.35, 0.45, 0.20
+    score = (w_budget * budget_fit) + (w_proximity * proximity) + (w_visa * (1.0 if visa_free else 0.0))
+
+    return {"score": score, "proximity_label": proximity_label, "visa_free": visa_free}
+
+
 def _apply_explore_pick(d: dict):
     """'이 여행지로 검색하기' 버튼 콜백. 아래 세부 검색 조건의 도착지/날짜를
     추천받은 값으로 채워 넣는다. 공항코드가 있으면 그걸 우선 사용해
@@ -661,7 +719,13 @@ with st.expander("💡 예산으로 여행지 추천받기", expanded=False):
                 st.warning(explore_err)
 
             affordable = [d for d in destinations if d["total_price"] <= budget]
-            affordable.sort(key=lambda d: d["total_price"], reverse=True)  # 예산에 가장 가까운 순
+            for d in affordable:
+                ks = korea_travel_score(d["country"], d["total_price"], budget)
+                d["korea_score"] = ks["score"]
+                d["proximity_label"] = ks["proximity_label"]
+                d["visa_free"] = ks["visa_free"]
+            # 한국인 특화 점수(예산 활용도 35% + 접근성 45% + 무비자 20%) 높은 순
+            affordable.sort(key=lambda d: d["korea_score"], reverse=True)
 
             st.session_state["explore_results"] = {
                 "origin_name": explore_origin_name,
@@ -677,6 +741,8 @@ with st.expander("💡 예산으로 여행지 추천받기", expanded=False):
             for i, d in enumerate(explore_results["items"]):
                 with st.container(border=True):
                     st.markdown(f"**{d['name']}, {d['country']}**")
+                    visa_badge = "✅ 무비자" if d.get("visa_free") else "🛂 비자 확인 필요"
+                    st.caption(f"📍 {d.get('proximity_label', '-')} · {visa_badge}")
                     st.write(
                         f"{d['start_date']} ~ {d['end_date']} · "
                         f"항공 {d['flight_price']:,}원 + 숙박(전체) {d['hotel_price']:,}원 "
@@ -694,7 +760,7 @@ with st.expander("💡 예산으로 여행지 추천받기", expanded=False):
                             on_click=_apply_explore_pick,
                             args=(d,)
                         )
-            st.caption("ℹ️ 가격은 Google이 제공하는 참고용 예상치입니다(숙박비는 전체 기간 기준으로 가정). 실제 예약 가능 여부와 정확한 금액은 아래 세부 검색에서 다시 확인해주세요.")
+            st.caption("ℹ️ 가격은 Google이 제공하는 참고용 예상치입니다(숙박비는 전체 기간 기준으로 가정). 무비자 표기도 참고용 스냅샷이니 실제 예약 가능 여부·금액·비자 요건은 아래 세부 검색과 외교부/대사관 공지에서 다시 확인해주세요.")
 
 st.divider()
 
