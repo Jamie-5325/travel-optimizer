@@ -178,7 +178,7 @@ def resolve_flight_location(query: str, hl: str = "ko") -> Tuple[Optional[str], 
     return resolved_id, resolved_name, None
 
 
-async def fetch_flights_async(client, origin_id, destination_id, outbound_date, return_date, flights_link) -> Tuple[List[dict], Optional[str]]:
+async def fetch_flights_async(client, origin_id, destination_id, outbound_date, return_date, adults, children, infants, flights_link) -> Tuple[List[dict], Optional[str]]:
     """
     왕복(Round trip) 항공권을 조회한다.
 
@@ -205,6 +205,9 @@ async def fetch_flights_async(client, origin_id, destination_id, outbound_date, 
         "outbound_date": outbound_date,
         "return_date": return_date,
         "type": "1",  # 왕복
+        "adults": adults,
+        "children": children,
+        "infants_on_lap": min(infants, adults),  # 유아(무릎 동반)는 보호자 1인당 1명까지
         "currency": "KRW",
         "hl": "ko",
         "api_key": SERPAPI_KEY
@@ -242,17 +245,23 @@ async def fetch_flights_async(client, origin_id, destination_id, outbound_date, 
         return [], f"항공권 조회 실패: {e}"
 
 
-async def fetch_hotels_async(client, destination, check_in, check_out) -> Tuple[List[dict], Optional[str]]:
+async def fetch_hotels_async(client, destination, check_in, check_out, adults, children) -> Tuple[List[dict], Optional[str]]:
     url = "https://serpapi.com/search"
     params = {
         "engine": "google_hotels",
         "q": destination,
         "check_in_date": check_in,
         "check_out_date": check_out,
+        "adults": adults,
+        "children": children,
         "currency": "KRW",
         "hl": "ko",
         "api_key": SERPAPI_KEY
     }
+    if children > 0:
+        # Google Hotels는 children > 0이면 children_ages(나이별 목록)가 필요하다.
+        # 이 앱은 소아 인원수만 받으므로, 대표 나이(8세)를 인원수만큼 채워 넣는다.
+        params["children_ages"] = ",".join(["8"] * children)
     try:
         response = await client.get(url, params=params, timeout=15.0)
         response.raise_for_status()
@@ -286,18 +295,18 @@ async def fetch_hotels_async(client, destination, check_in, check_out) -> Tuple[
         return [], f"숙박 조회 실패: {e}"
 
 
-async def fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, flights_link):
+async def fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, adults, children, infants, flights_link):
     async with httpx.AsyncClient() as client:
         # check_in = 출국일(outbound_date), check_out = 귀국일(return_date) 겸
         # 호텔 체크아웃일로 동일하게 사용한다(왕복 여행 = 숙박 기간과 동일).
-        f_task = fetch_flights_async(client, origin_id, destination_id, check_in, check_out, flights_link)
-        h_task = fetch_hotels_async(client, destination_query, check_in, check_out)
+        f_task = fetch_flights_async(client, origin_id, destination_id, check_in, check_out, adults, children, infants, flights_link)
+        h_task = fetch_hotels_async(client, destination_query, check_in, check_out, adults, children)
         return await asyncio.gather(f_task, h_task)
 
 
 @st.cache_data(ttl=3600)
-def get_cached_api_data(origin_id, destination_id, destination_query, check_in, check_out, flights_link):
-    return asyncio.run(fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, flights_link))
+def get_cached_api_data(origin_id, destination_id, destination_query, check_in, check_out, adults, children, infants, flights_link):
+    return asyncio.run(fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, adults, children, infants, flights_link))
 
 # ==========================================
 # 3. 최적화 알고리즘
@@ -352,6 +361,15 @@ with st.expander("🔍 검색 조건 및 가중치 설정", expanded=True):
     end_date = col_date2.date_input("귀국일")
     st.caption("ℹ️ 항공권은 왕복(출발일→귀국일) 기준으로 조회됩니다. 표시되는 가격은 Google Flights의 왕복 예상 요금이며, 실제 예약 가능 여부와 최종 가격은 링크에서 다시 확인해주세요.")
 
+    col_pax1, col_pax2, col_pax3 = st.columns(3)
+    adults = col_pax1.number_input("성인", min_value=1, value=1, step=1)
+    children = col_pax2.number_input("소아 (만 2~11세)", min_value=0, value=0, step=1)
+    infants = col_pax3.number_input("유아 (만 2세 미만)", min_value=0, value=0, step=1)
+    if infants > adults:
+        st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
+    if children > 0:
+        st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
+
     def _sync_budget_from_text():
         """입력창의 텍스트(콤마 포함 가능)를 정수로 변환해 실제 예산 값으로
         저장하고, 입력창 표시값은 콤마가 포함된 형태로 다시 맞춰준다."""
@@ -399,7 +417,7 @@ if st.button("최적 조합 검색", use_container_width=True):
             if dest_err:
                 st.error(f"도착지 인식 실패: {dest_err}")
         else:
-            st.caption(f"✓ 출발지: {origin_name} · 도착지: {dest_name}")
+            st.caption(f"✓ 출발지: {origin_name} · 도착지: {dest_name} · 성인 {adults}명 · 소아 {children}명 · 유아 {min(infants, adults)}명")
 
             with st.spinner("데이터 통신 및 최적화 계산 중..."):
                 d_start = start_date.strftime("%Y-%m-%d")
@@ -415,7 +433,7 @@ if st.button("최적 조합 검색", use_container_width=True):
                 )
 
                 (flights, f_err), (hotels, h_err) = get_cached_api_data(
-                    origin_id, dest_id, destination, d_start, d_end, flights_link
+                    origin_id, dest_id, destination, d_start, d_end, adults, children, infants, flights_link
                 )
 
                 if f_err:
