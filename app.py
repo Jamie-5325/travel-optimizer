@@ -35,6 +35,7 @@ class FlightModel(BaseModel):
     price: int = Field(gt=0, description="항공권 가격")
     stops: int = Field(ge=0, description="경유 횟수")
     duration: float = Field(gt=0.0, description="비행 시간")
+    link: Optional[str] = Field(default=None, description="항공편 예약/조회 링크")
 
     @validator('price', pre=True)
     def clean_price(cls, v):
@@ -45,6 +46,7 @@ class HotelModel(BaseModel):
     id: str = Field(description="호텔명")
     price: int = Field(gt=0, description="1박 가격")
     rating: float = Field(ge=0.0, le=5.0, default=3.0)
+    link: Optional[str] = Field(default=None, description="호텔 예약/상세 페이지 링크")
 
     @validator('price', pre=True)
     def clean_price(cls, v):
@@ -121,6 +123,13 @@ async def fetch_flights_async(client, origin, destination, date) -> Tuple[List[d
         if "error" in data:
             return [], f"항공권 API 오류: {data['error']}"
 
+        # SerpApi가 이번 검색 조건 그대로 Google Flights 결과 페이지로 이동하는
+        # 링크를 제공한다(search_metadata.google_flights_url). 항공편별 개별
+        # 예약 링크는 departure_token/booking_token을 이용한 별도 2~3단계
+        # 요청이 필요해 현재 단일 요청 구조와는 맞지 않으므로, 대신 이 링크를
+        # 모든 항공편에 공통으로 붙여 "Google Flights에서 확인/예약"할 수 있게 한다.
+        flights_url = data.get("search_metadata", {}).get("google_flights_url")
+
         parsed = []
         flights_data = data.get("best_flights", []) + data.get("other_flights", [])
 
@@ -133,7 +142,8 @@ async def fetch_flights_async(client, origin, destination, date) -> Tuple[List[d
                 "id": f"{flight_info.get('flight_number', 'Unknown')}_{flight_info.get('airline', 'Unknown')}",
                 "price": f.get("price", 0),
                 "stops": len(f.get("layovers", [])),
-                "duration": f.get("total_duration", 0) / 60.0
+                "duration": f.get("total_duration", 0) / 60.0,
+                "link": flights_url
             })
         return validate_flights(parsed), None
     except httpx.HTTPStatusError as e:
@@ -168,7 +178,8 @@ async def fetch_hotels_async(client, destination, check_in, check_out) -> Tuple[
             parsed.append({
                 "id": p.get("name", "Unknown Hotel"),
                 "price": p.get("rate_per_night", {}).get("lowest", "0"),
-                "rating": p.get("overall_rating", 3.0)
+                "rating": p.get("overall_rating", 3.0),
+                "link": p.get("link")
             })
         return validate_hotels(parsed), None
     except httpx.HTTPStatusError as e:
@@ -273,6 +284,31 @@ if st.button("최적 조합 검색", use_container_width=True):
                     col2.metric("잔여 예산", f"{budget - result['total_price']:,} 원")
                     st.metric("유틸리티 점수", f"{result['score']:.2f}")
 
-                    st.json({"항공편": result['flight'], "숙박": result['hotel']})
+                    st.divider()
+                    flight = result['flight']
+                    hotel = result['hotel']
+
+                    link_col1, link_col2 = st.columns(2)
+
+                    with link_col1:
+                        st.markdown("**✈️ 추천 항공편**")
+                        st.write(f"{flight['id']}")
+                        st.write(f"{flight['price']:,}원 · 경유 {flight['stops']}회 · {flight['duration']:.1f}시간")
+                        if flight.get('link'):
+                            st.link_button("Google Flights에서 보기", flight['link'], use_container_width=True)
+                        else:
+                            st.caption("예약 링크를 찾을 수 없습니다.")
+
+                    with link_col2:
+                        st.markdown("**🏨 추천 숙소**")
+                        st.write(f"{hotel['id']}")
+                        st.write(f"{hotel['price']:,}원 · 평점 {hotel['rating']:.1f}")
+                        if hotel.get('link'):
+                            st.link_button("호텔 페이지에서 보기", hotel['link'], use_container_width=True)
+                        else:
+                            st.caption("예약 링크를 찾을 수 없습니다.")
+
+                    with st.expander("상세 데이터 (JSON)"):
+                        st.json({"항공편": flight, "숙박": hotel})
                 else:
                     st.error("해당 예산으로 구성 가능한 조합이 없습니다.")
