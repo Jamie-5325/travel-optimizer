@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import itertools
 import re
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 from urllib.parse import quote
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Tuple
@@ -352,68 +352,6 @@ async def fetch_all_data(origin_id, destination_id, destination_query, check_in,
 
 
 @st.cache_data(ttl=3600)
-def get_explore_destinations(origin_id: str, travel_duration: str, adults: int = 1, children: int = 0, infants: int = 0):
-    """
-    출발지와 여행 기간, 인원수로 인기 여행지 후보(도시 + 예상 날짜 + 가격)를
-    가져온다. SerpApi의 google_travel_explore 엔진(Google Flights 홈의
-    'Explore' 지도 기능과 동일)을 사용한다. 이 엔진도 google_flights와 동일한
-    adults/children/infants_on_lap 인원 파라미터를 지원한다.
-
-    참고: 응답의 'hotel_price'가 1박 기준인지 숙박 전체 기간 기준인지
-    SerpApi 공식 문서에 명시돼 있지 않다. 이 앱은 필드명 그대로
-    "숙박 전체 예상 비용"으로 간주해 항공가와 합산하므로, 실제 총비용과
-    차이가 있을 수 있다.
-    """
-    url = "https://serpapi.com/search"
-    params = {
-        "engine": "google_travel_explore",
-        "departure_id": origin_id,
-        "travel_duration": travel_duration,
-        "month": 0,
-        "type": "1",  # 왕복
-        "adults": adults,
-        "children": children,
-        "infants_on_lap": infants,
-        "currency": "KRW",
-        "hl": "ko",
-        "gl": "kr",
-        "api_key": SERPAPI_KEY
-    }
-    try:
-        response = httpx.get(url, params=params, timeout=20.0)
-        response.raise_for_status()
-        data = response.json()
-    except Exception as e:
-        return [], f"여행지 추천 조회 실패: {e}"
-
-    if "error" in data:
-        return [], f"여행지 추천 조회 오류: {data['error']}"
-
-    destinations = data.get("destinations", [])
-    if not destinations:
-        return [], "추천할 만한 여행지를 찾지 못했습니다. 기간을 바꿔서 다시 시도해보세요."
-
-    parsed = []
-    for d in destinations:
-        flight_price = d.get("flight_price")
-        hotel_price = d.get("hotel_price")
-        if flight_price is None or hotel_price is None:
-            continue
-        parsed.append({
-            "name": d.get("name", "알 수 없음"),
-            "country": d.get("country", ""),
-            "airport_code": d.get("destination_airport", {}).get("code"),
-            "start_date": d.get("start_date"),
-            "end_date": d.get("end_date"),
-            "flight_price": int(flight_price),
-            "hotel_price": int(hotel_price),
-            "total_price": int(flight_price) + int(hotel_price),
-            "link": d.get("link"),
-        })
-    return parsed, None
-
-
-@st.cache_data(ttl=3600)
 def get_cached_api_data(origin_id, destination_id, destination_query, check_in, check_out, adults, children, infants, flights_link):
     return asyncio.run(fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, adults, children, infants, flights_link))
 
@@ -527,78 +465,6 @@ def location_picker(label: str, state_key: str, default: str) -> str:
     return st.session_state[state_key]
 
 
-# 한국 출발 기준 대략적인 근접 권역 분류(비행시간 휴리스틱).
-# "여행지 추천받기"의 접근성 점수 계산에만 쓰이는 참고용 분류다.
-NEARBY_ASIA_COUNTRIES = {
-    "Japan", "Taiwan", "Hong Kong", "Macau", "Macao", "China",
-    "Vietnam", "Thailand", "Philippines", "Singapore", "Malaysia",
-    "Cambodia", "Laos", "Mongolia", "Brunei",
-}
-MID_RANGE_COUNTRIES = {
-    "Guam", "Northern Mariana Islands", "Indonesia", "India",
-    "United Arab Emirates", "Qatar", "Turkey", "Türkiye",
-    "Australia", "New Zealand", "Sri Lanka", "Nepal", "Maldives",
-}
-# 그 외 국가(유럽/미주/아프리카 등)는 장거리로 취급한다.
-
-# 한국 여권 기준 대부분의 여행 목적에서 무비자(또는 도착비자/사전 온라인
-# 허가만으로) 입국 가능한 국가 목록(참고용, 대략적 스냅샷).
-# ⚠️ 비자 요건은 양국 협정에 따라 수시로 바뀔 수 있어 점수 계산용
-# 참고 자료일 뿐, 실제 출입국 요건은 반드시 외교부/대사관에서 재확인해야 한다.
-VISA_FREE_FOR_KOREAN_PASSPORT = {
-    "Japan", "Taiwan", "Hong Kong", "Macau", "Macao",
-    "Thailand", "Vietnam", "Philippines", "Singapore", "Malaysia",
-    "Cambodia", "Laos", "Indonesia", "Mongolia",
-    "France", "Germany", "Italy", "Spain", "Portugal", "Netherlands",
-    "Belgium", "Switzerland", "Austria", "Greece", "United Kingdom",
-    "Ireland", "Sweden", "Norway", "Denmark", "Finland", "Iceland",
-    "Czechia", "Czech Republic", "Poland", "Hungary", "Croatia",
-    "United States", "Canada", "Mexico", "Australia", "New Zealand",
-    "United Arab Emirates", "Qatar", "Turkey", "Türkiye",
-}
-
-
-def korea_travel_score(country: str, total_price: int, budget: int) -> dict:
-    """
-    '예산으로 여행지 추천받기'의 점수 체계 — 한국 출발 여행자에 특화된
-    가중치로 재설계했다. 세 요소를 조합한다:
-    - 예산 활용도(35%): 예산 한도 안에서 예산에 가까울수록 높음
-    - 접근성(45%): 근거리 아시아를 가장 높게 쳐준다. 한국인 해외여행객의
-      압도적 다수가 일본/동남아 등 단거리 아시아 국가에 몰리는 실제 여행
-      패턴을 반영해, 세 요소 중 가장 큰 비중을 뒀다.
-    - 무비자 여부(20%): 한국 여권으로 무비자 입국 가능하면 가점
-    """
-    budget_fit = (total_price / budget) if budget else 0.0
-
-    if country in NEARBY_ASIA_COUNTRIES:
-        proximity, proximity_label = 1.0, "근거리(아시아)"
-    elif country in MID_RANGE_COUNTRIES:
-        proximity, proximity_label = 0.55, "중거리"
-    else:
-        proximity, proximity_label = 0.2, "장거리"
-
-    visa_free = country in VISA_FREE_FOR_KOREAN_PASSPORT
-
-    w_budget, w_proximity, w_visa = 0.35, 0.45, 0.20
-    score = (w_budget * budget_fit) + (w_proximity * proximity) + (w_visa * (1.0 if visa_free else 0.0))
-
-    return {"score": score, "proximity_label": proximity_label, "visa_free": visa_free}
-
-
-def _apply_explore_pick(d: dict):
-    """'이 여행지로 검색하기' 버튼 콜백. 아래 세부 검색 조건의 도착지/날짜를
-    추천받은 값으로 채워 넣는다. 공항코드가 있으면 그걸 우선 사용해
-    도착지 재인식(autocomplete 호출)을 건너뛴다."""
-    st.session_state["destination_text"] = d.get("airport_code") or d.get("name", "")
-    try:
-        if d.get("start_date"):
-            st.session_state["start_date_input"] = datetime.strptime(d["start_date"], "%Y-%m-%d").date()
-        if d.get("end_date"):
-            st.session_state["end_date_input"] = datetime.strptime(d["end_date"], "%Y-%m-%d").date()
-    except ValueError:
-        pass
-
-
 # ==========================================
 # 4. 모바일 최적화 Streamlit UI
 # ==========================================
@@ -693,74 +559,6 @@ with st.popover(f"👤 {_pax_summary}", use_container_width=True):
         st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
     if children > 0:
         st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
-
-st.divider()
-
-# --- 예산으로 여행지 추천받기 (도착지를 아직 안 정했을 때) ---
-with st.expander("💡 예산으로 여행지 추천받기", expanded=False):
-    st.caption("도착지를 아직 못 정했다면, 출발지·예산·인원만으로 갈 수 있는 여행지와 일정을 먼저 추천받아보세요.")
-    duration_label = st.selectbox("여행 기간", ["주말", "1주일", "2주일"], index=1, key="explore_duration_label")
-    duration_map = {"주말": "1", "1주일": "2", "2주일": "3"}
-
-    if st.button("여행지 추천받기", use_container_width=True, key="explore_search_button"):
-        with st.spinner("출발지 확인 중..."):
-            explore_origin_id, explore_origin_name, explore_origin_err = resolve_flight_location(origin)
-
-        if explore_origin_err:
-            st.session_state["explore_results"] = None
-            st.error(f"출발지 인식 실패: {explore_origin_err}")
-        else:
-            with st.spinner(f"{explore_origin_name} 출발, 예산 안에서 갈 수 있는 여행지를 찾는 중..."):
-                destinations, explore_err = get_explore_destinations(
-                    explore_origin_id, duration_map[duration_label], adults, children, min(infants, adults)
-                )
-
-            if explore_err:
-                st.warning(explore_err)
-
-            affordable = [d for d in destinations if d["total_price"] <= budget]
-            for d in affordable:
-                ks = korea_travel_score(d["country"], d["total_price"], budget)
-                d["korea_score"] = ks["score"]
-                d["proximity_label"] = ks["proximity_label"]
-                d["visa_free"] = ks["visa_free"]
-            # 한국인 특화 점수(예산 활용도 35% + 접근성 45% + 무비자 20%) 높은 순
-            affordable.sort(key=lambda d: d["korea_score"], reverse=True)
-
-            st.session_state["explore_results"] = {
-                "origin_name": explore_origin_name,
-                "items": affordable[:6],
-            }
-
-    explore_results = st.session_state.get("explore_results")
-    if explore_results:
-        if not explore_results["items"]:
-            st.info("이 예산으로 갈 수 있는 여행지를 찾지 못했습니다. 예산을 늘리거나 여행 기간을 조정해보세요.")
-        else:
-            st.success(f"{explore_results['origin_name']} 출발 기준, 예산 안에서 {len(explore_results['items'])}곳을 찾았습니다.")
-            for i, d in enumerate(explore_results["items"]):
-                with st.container(border=True):
-                    st.markdown(f"**{d['name']}, {d['country']}**")
-                    visa_badge = "✅ 무비자" if d.get("visa_free") else "🛂 비자 확인 필요"
-                    st.caption(f"📍 {d.get('proximity_label', '-')} · {visa_badge}")
-                    st.write(
-                        f"{d['start_date']} ~ {d['end_date']} · "
-                        f"항공 {d['flight_price']:,}원 + 숙박(전체) {d['hotel_price']:,}원 "
-                        f"= 총 {d['total_price']:,}원"
-                    )
-                    pcol1, pcol2 = st.columns(2)
-                    with pcol1:
-                        if d.get("link"):
-                            st.link_button("Google 탐색에서 보기", d["link"], use_container_width=True)
-                    with pcol2:
-                        st.button(
-                            "이 여행지로 검색하기",
-                            key=f"explore_pick_{i}",
-                            use_container_width=True,
-                            on_click=_apply_explore_pick,
-                            args=(d,)
-                        )
-            st.caption("ℹ️ 가격은 Google이 제공하는 참고용 예상치입니다(숙박비는 전체 기간 기준으로 가정). 무비자 표기도 참고용 스냅샷이니 실제 예약 가능 여부·금액·비자 요건은 아래 세부 검색과 외교부/대사관 공지에서 다시 확인해주세요.")
 
 st.divider()
 
