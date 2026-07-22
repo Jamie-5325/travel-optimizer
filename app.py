@@ -496,6 +496,52 @@ def location_picker(label: str, state_key: str, default: str) -> str:
 # ==========================================
 st.set_page_config(page_title="항공+숙박 최적화", layout="centered", initial_sidebar_state="collapsed")
 
+# 일러스트에서 쓴 팔레트(#2E5E73 진청록 / #E4784B 코랄 / #8FB9C9 연청)를
+# 버튼·지표·expander 등 앱 전체에도 일관되게 확장 적용한다. 한글 렌더링에
+# 강점이 있는 Pretendard 웹폰트도 함께 적용해 기본 Streamlit 느낌을 덜어냈다.
+# 주의: 이 블록도 마찬가지로 줄 앞 들여쓰기를 두지 않는다(Markdown 코드블록
+# 오인식 방지).
+custom_css = """<style>
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+html, body, [class*="css"] {
+font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Malgun Gothic', sans-serif;
+}
+.stButton > button[kind="primary"] {
+background-color: #2E5E73;
+border: none;
+border-radius: 10px;
+font-weight: 600;
+transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.stButton > button[kind="primary"]:hover {
+background-color: #244C5E;
+box-shadow: 0 4px 10px rgba(46, 94, 115, 0.28);
+transform: translateY(-1px);
+}
+.stButton > button[kind="secondary"] {
+border-radius: 10px;
+border-color: #C7DDE3;
+}
+.stButton > button[kind="secondary"]:hover {
+border-color: #2E5E73;
+color: #2E5E73;
+}
+[data-testid="stMetric"] {
+background-color: #F7FBFC;
+border: 1px solid #E3EEF1;
+border-radius: 12px;
+padding: 0.9rem 0.8rem;
+}
+[data-testid="stMetricValue"] {
+color: #2E5E73;
+}
+[data-testid="stExpander"] {
+border-radius: 12px;
+border: 1px solid #E3EEF1;
+}
+</style>"""
+st.markdown(custom_css, unsafe_allow_html=True)
+
 # 주의: 아래 HTML 문자열은 각 줄을 반드시 들여쓰기 없이(맨 앞 칸부터) 작성해야
 # 한다. Markdown은 줄 앞에 공백이 4칸 이상이면 "코드 블록"으로 인식해버려서,
 # unsafe_allow_html=True를 줘도 HTML/SVG가 그대로 렌더링되지 않고 텍스트로
@@ -616,7 +662,7 @@ with st.expander("⚙️ 가중치 설정 (선택)", expanded=False):
     w_hotel = st.slider("숙박 품질 비중", 0.0, 1.0, 0.3)
     w_flight = st.slider("직항 선호 비중", 0.0, 1.0, 0.8)
 
-if st.button("최적 조합 검색", use_container_width=True):
+if st.button("최적 조합 검색", use_container_width=True, type="primary"):
     if start_date >= end_date:
         st.error("귀국일은 출발일 이후여야 합니다.")
     else:
@@ -684,22 +730,24 @@ if st.button("최적 조합 검색", use_container_width=True):
                         link_col1, link_col2 = st.columns(2)
 
                         with link_col1:
-                            st.markdown("**✈️ 추천 항공편 (왕복)**")
-                            st.write(f"{flight['id']}")
-                            st.write(f"왕복 {flight['price']:,}원 · 출국편 경유 {flight['stops']}회 · 출국편 비행 {flight['duration']:.1f}시간")
-                            if flight.get('link'):
-                                st.link_button("Google Flights에서 보기", flight['link'], use_container_width=True)
-                            else:
-                                st.caption("예약 링크를 찾을 수 없습니다.")
+                            with st.container(border=True):
+                                st.markdown("**✈️ 추천 항공편 (왕복)**")
+                                st.write(f"{flight['id']}")
+                                st.write(f"왕복 {flight['price']:,}원 · 출국편 경유 {flight['stops']}회 · 출국편 비행 {flight['duration']:.1f}시간")
+                                if flight.get('link'):
+                                    st.link_button("Google Flights에서 보기", flight['link'], use_container_width=True)
+                                else:
+                                    st.caption("예약 링크를 찾을 수 없습니다.")
 
                         with link_col2:
-                            st.markdown(f"**🏨 추천 숙소 ({nights}박)**")
-                            st.write(f"{hotel['id']}")
-                            st.write(f"1박 {hotel['price_per_night']:,}원 × {nights}박 = 총 {hotel['total_price']:,}원 · 평점 {hotel['rating']:.1f}")
-                            if hotel.get('link'):
-                                st.link_button("호텔 페이지에서 보기", hotel['link'], use_container_width=True)
-                            else:
-                                st.caption("예약 링크를 찾을 수 없습니다.")
+                            with st.container(border=True):
+                                st.markdown(f"**🏨 추천 숙소 ({nights}박)**")
+                                st.write(f"{hotel['id']}")
+                                st.write(f"1박 {hotel['price_per_night']:,}원 × {nights}박 = 총 {hotel['total_price']:,}원 · 평점 {hotel['rating']:.1f}")
+                                if hotel.get('link'):
+                                    st.link_button("호텔 페이지에서 보기", hotel['link'], use_container_width=True)
+                                else:
+                                    st.caption("예약 링크를 찾을 수 없습니다.")
 
                         with st.expander("상세 데이터 (JSON)"):
                             st.json({"항공편": flight, "숙박": hotel})
