@@ -29,6 +29,28 @@ def clean_currency_string(v):
     return v
 
 
+def format_korean_won(amount: int) -> str:
+    """
+    숫자를 억/만 단위의 한글 표기로 변환한다.
+    예: 1,000,000 -> '100만원', 123,456,789 -> '1억 2,345만 6,789원'
+    """
+    amount = int(amount)
+    if amount == 0:
+        return "0원"
+
+    eok, rem = divmod(amount, 100_000_000)
+    man, won = divmod(rem, 10_000)
+
+    parts = []
+    if eok:
+        parts.append(f"{eok:,}억")
+    if man:
+        parts.append(f"{man:,}만")
+    if won or not parts:
+        parts.append(f"{won:,}")
+    return " ".join(parts) + "원"
+
+
 # ==========================================
 # 1. Pydantic 데이터 검증 모델
 # ==========================================
@@ -316,7 +338,8 @@ def find_optimal_combination(flights, hotels, budget, weights):
 # 4. 모바일 최적화 Streamlit UI
 # ==========================================
 st.set_page_config(page_title="항공+숙박 최적화", layout="centered", initial_sidebar_state="collapsed")
-st.title("✈️ 여행 예산 최적화")
+st.title("✈️ 예산은 그대로, 여행은 최고로")
+st.caption("항공권과 숙소, 정해진 예산 안에서 가장 완벽한 조합을 찾아드립니다.")
 
 with st.expander("🔍 검색 조건 및 가중치 설정", expanded=True):
     col_loc1, col_loc2 = st.columns(2)
@@ -329,12 +352,38 @@ with st.expander("🔍 검색 조건 및 가중치 설정", expanded=True):
     end_date = col_date2.date_input("귀국일")
     st.caption("ℹ️ 항공권은 왕복(출발일→귀국일) 기준으로 조회됩니다. 표시되는 가격은 Google Flights의 왕복 예상 요금이며, 실제 예약 가능 여부와 최종 가격은 링크에서 다시 확인해주세요.")
 
-    budget = st.number_input("최대 예산 (원)", min_value=100000, value=1000000, step=50000)
+    def _sync_budget_from_text():
+        """입력창의 텍스트(콤마 포함 가능)를 정수로 변환해 실제 예산 값으로
+        저장하고, 입력창 표시값은 콤마가 포함된 형태로 다시 맞춰준다."""
+        raw = st.session_state.get("budget_text", "")
+        cleaned = raw.replace(",", "").replace("원", "").strip()
+        try:
+            value = int(cleaned) if cleaned else 100000
+        except ValueError:
+            value = st.session_state.get("budget_value", 1000000)
+        value = max(value, 100000)
+        st.session_state["budget_value"] = value
+        st.session_state["budget_text"] = f"{value:,}"
+
+    if "budget_value" not in st.session_state:
+        st.session_state["budget_value"] = 1000000
+    if "budget_text" not in st.session_state:
+        st.session_state["budget_text"] = f"{st.session_state['budget_value']:,}"
+
+    st.text_input(
+        "최대 예산 (원)",
+        key="budget_text",
+        on_change=_sync_budget_from_text,
+        help="숫자만 입력해도 자동으로 콤마(,)가 붙습니다. 최소 100,000원."
+    )
+    budget = st.session_state["budget_value"]
+    st.caption(f"💰 {budget:,}원 ({format_korean_won(budget)})")
 
     st.divider()
-    w_budget = st.slider("예산 소진율 비중", 0.0, 1.0, 0.5)
+    st.caption("ℹ️ '예산 소진율 비중'을 높일수록 예산 한도 내에서 총비용이 예산에 최대한 가깝게 나오도록 우선순위를 둡니다(예산 초과는 항상 차단됩니다).")
+    w_budget = st.slider("예산 소진율 비중", 0.0, 1.0, 1.0)
     w_hotel = st.slider("숙박 품질 비중", 0.0, 1.0, 0.3)
-    w_flight = st.slider("직항 선호 비중", 0.0, 1.0, 0.2)
+    w_flight = st.slider("직항 선호 비중", 0.0, 1.0, 0.8)
 
 if st.button("최적 조합 검색", use_container_width=True):
     if start_date >= end_date:
