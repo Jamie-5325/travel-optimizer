@@ -352,11 +352,12 @@ async def fetch_all_data(origin_id, destination_id, destination_query, check_in,
 
 
 @st.cache_data(ttl=3600)
-def get_explore_destinations(origin_id: str, travel_duration: str, month: int = 0):
+def get_explore_destinations(origin_id: str, travel_duration: str, adults: int = 1, children: int = 0, infants: int = 0):
     """
-    출발지와 여행 기간만으로 인기 여행지 후보(도시 + 예상 날짜 + 가격)를
+    출발지와 여행 기간, 인원수로 인기 여행지 후보(도시 + 예상 날짜 + 가격)를
     가져온다. SerpApi의 google_travel_explore 엔진(Google Flights 홈의
-    'Explore' 지도 기능과 동일)을 사용한다.
+    'Explore' 지도 기능과 동일)을 사용한다. 이 엔진도 google_flights와 동일한
+    adults/children/infants_on_lap 인원 파라미터를 지원한다.
 
     참고: 응답의 'hotel_price'가 1박 기준인지 숙박 전체 기간 기준인지
     SerpApi 공식 문서에 명시돼 있지 않다. 이 앱은 필드명 그대로
@@ -368,8 +369,11 @@ def get_explore_destinations(origin_id: str, travel_duration: str, month: int = 
         "engine": "google_travel_explore",
         "departure_id": origin_id,
         "travel_duration": travel_duration,
-        "month": month,
+        "month": 0,
         "type": "1",  # 왕복
+        "adults": adults,
+        "children": children,
+        "infants_on_lap": infants,
         "currency": "KRW",
         "hl": "ko",
         "gl": "kr",
@@ -510,41 +514,39 @@ def _apply_explore_pick(d: dict):
 # ==========================================
 st.set_page_config(page_title="항공+숙박 최적화", layout="centered", initial_sidebar_state="collapsed")
 
-st.markdown(
-    """
-    <div style="text-align:center; margin: 0.5rem 0 0.75rem 0;">
-        <svg viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg"
-             style="width:100%; max-width:360px; height:auto;">
-            <defs>
-                <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="#EAF4F8"/>
-                    <stop offset="100%" stop-color="#F7EFE3"/>
-                </linearGradient>
-            </defs>
-            <rect x="0" y="0" width="400" height="200" rx="24" fill="url(#skyGrad)"/>
-            <path d="M70,150 C150,60 250,50 330,70" fill="none" stroke="#8FB9C9"
-                  stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round"/>
-            <g transform="translate(48,150)">
-                <rect x="-24" y="-14" width="48" height="34" rx="6" fill="#E4784B"/>
-                <rect x="-9" y="-24" width="18" height="12" rx="3" fill="#C85F36"/>
-                <rect x="-24" y="-2" width="48" height="6" fill="#C85F36"/>
-            </g>
-            <g transform="translate(230,68) rotate(-18)">
-                <path d="M-16,-6 L16,0 L-16,6 L-6,0 Z" fill="#2E5E73"/>
-            </g>
-            <g transform="translate(335,68)">
-                <path d="M0,-16 C9,-16 16,-9 16,0 C16,11 0,26 0,26 C0,26 -16,11 -16,0 C-16,-9 -9,-16 0,-16 Z" fill="#3E7C8C"/>
-                <circle cx="0" cy="0" r="5.5" fill="#FFFFFF"/>
-            </g>
-        </svg>
-    </div>
-    <p style="text-align:center; font-size:1.25rem; font-weight:700; color:#2E5E73;
-              line-height:1.4; margin: 0 0 1rem 0;">
-        항공권과 숙소, 정해진 예산 안에서<br>가장 완벽한 조합을 찾아드립니다.
-    </p>
-    """,
-    unsafe_allow_html=True
-)
+# 주의: 아래 HTML 문자열은 각 줄을 반드시 들여쓰기 없이(맨 앞 칸부터) 작성해야
+# 한다. Markdown은 줄 앞에 공백이 4칸 이상이면 "코드 블록"으로 인식해버려서,
+# unsafe_allow_html=True를 줘도 HTML/SVG가 그대로 렌더링되지 않고 텍스트로
+# 표시(또는 미표시)되는 문제가 있었다.
+illustration_html = """<div style="text-align:center; margin: 0.5rem 0 0.75rem 0;">
+<svg viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" style="width:100%; max-width:360px; height:auto;">
+<defs>
+<linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0%" stop-color="#EAF4F8"/>
+<stop offset="100%" stop-color="#F7EFE3"/>
+</linearGradient>
+</defs>
+<rect x="0" y="0" width="400" height="200" rx="24" fill="url(#skyGrad)"/>
+<path d="M70,150 C150,60 250,50 330,70" fill="none" stroke="#8FB9C9" stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round"/>
+<g transform="translate(48,150)">
+<rect x="-24" y="-14" width="48" height="34" rx="6" fill="#E4784B"/>
+<rect x="-9" y="-24" width="18" height="12" rx="3" fill="#C85F36"/>
+<rect x="-24" y="-2" width="48" height="6" fill="#C85F36"/>
+</g>
+<g transform="translate(230,68) rotate(-18)">
+<path d="M-16,-6 L16,0 L-16,6 L-6,0 Z" fill="#2E5E73"/>
+</g>
+<g transform="translate(335,68)">
+<path d="M0,-16 C9,-16 16,-9 16,0 C16,11 0,26 0,26 C0,26 -16,11 -16,0 C-16,-9 -9,-16 0,-16 Z" fill="#3E7C8C"/>
+<circle cx="0" cy="0" r="5.5" fill="#FFFFFF"/>
+</g>
+</svg>
+</div>
+<p style="text-align:center; font-size:1.25rem; font-weight:700; color:#2E5E73; line-height:1.4; margin: 0 0 1rem 0;">
+항공권과 숙소, 정해진 예산 안에서<br>가장 완벽한 조합을 찾아드립니다.
+</p>"""
+
+st.markdown(illustration_html, unsafe_allow_html=True)
 
 # --- 최상단: 출발지 + 예산 (항상 보이는 영역) ---
 origin = location_picker("출발지 (공항코드 또는 도시명)", "origin_text", "ICN")
@@ -580,11 +582,20 @@ st.text_input(
 budget = st.session_state["budget_value"]
 st.caption(f"💰 {budget:,}원 ({format_korean_won(budget)})")
 
+col_pax1, col_pax2, col_pax3 = st.columns(3)
+adults = col_pax1.number_input("성인", min_value=1, value=1, step=1)
+children = col_pax2.number_input("소아 (만 2~11세)", min_value=0, value=0, step=1)
+infants = col_pax3.number_input("유아 (만 2세 미만)", min_value=0, value=0, step=1)
+if infants > adults:
+    st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
+if children > 0:
+    st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
+
 st.divider()
 
 # --- 예산으로 여행지 추천받기 (도착지를 아직 안 정했을 때) ---
 with st.expander("💡 예산으로 여행지 추천받기", expanded=False):
-    st.caption("도착지를 아직 못 정했다면, 출발지와 예산만으로 갈 수 있는 여행지와 일정을 먼저 추천받아보세요.")
+    st.caption("도착지를 아직 못 정했다면, 출발지·예산·인원만으로 갈 수 있는 여행지와 일정을 먼저 추천받아보세요.")
     duration_label = st.selectbox("여행 기간", ["주말", "1주일", "2주일"], index=1, key="explore_duration_label")
     duration_map = {"주말": "1", "1주일": "2", "2주일": "3"}
 
@@ -597,7 +608,9 @@ with st.expander("💡 예산으로 여행지 추천받기", expanded=False):
             st.error(f"출발지 인식 실패: {explore_origin_err}")
         else:
             with st.spinner(f"{explore_origin_name} 출발, 예산 안에서 갈 수 있는 여행지를 찾는 중..."):
-                destinations, explore_err = get_explore_destinations(explore_origin_id, duration_map[duration_label])
+                destinations, explore_err = get_explore_destinations(
+                    explore_origin_id, duration_map[duration_label], adults, children, min(infants, adults)
+                )
 
             if explore_err:
                 st.warning(explore_err)
@@ -654,15 +667,6 @@ with st.expander("🔍 세부 검색 조건 및 가중치 설정", expanded=True
     start_date = col_date1.date_input("출발일", key="start_date_input")
     end_date = col_date2.date_input("귀국일", key="end_date_input")
     st.caption("ℹ️ 항공권은 왕복(출발일→귀국일) 기준으로 조회됩니다. 표시되는 가격은 Google Flights의 왕복 예상 요금이며, 실제 예약 가능 여부와 최종 가격은 링크에서 다시 확인해주세요.")
-
-    col_pax1, col_pax2, col_pax3 = st.columns(3)
-    adults = col_pax1.number_input("성인", min_value=1, value=1, step=1)
-    children = col_pax2.number_input("소아 (만 2~11세)", min_value=0, value=0, step=1)
-    infants = col_pax3.number_input("유아 (만 2세 미만)", min_value=0, value=0, step=1)
-    if infants > adults:
-        st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
-    if children > 0:
-        st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
 
     st.divider()
     st.caption("ℹ️ '예산 소진율 비중'을 높일수록 예산 한도 내에서 총비용이 예산에 최대한 가깝게 나오도록 우선순위를 둡니다(예산 초과는 항상 차단됩니다).")
