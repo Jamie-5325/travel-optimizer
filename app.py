@@ -2,6 +2,7 @@ import streamlit as st
 import asyncio
 import httpx
 import itertools
+from urllib.parse import quote
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Tuple
 
@@ -123,12 +124,17 @@ async def fetch_flights_async(client, origin, destination, date) -> Tuple[List[d
         if "error" in data:
             return [], f"항공권 API 오류: {data['error']}"
 
-        # SerpApi가 이번 검색 조건 그대로 Google Flights 결과 페이지로 이동하는
-        # 링크를 제공한다(search_metadata.google_flights_url). 항공편별 개별
-        # 예약 링크는 departure_token/booking_token을 이용한 별도 2~3단계
-        # 요청이 필요해 현재 단일 요청 구조와는 맞지 않으므로, 대신 이 링크를
-        # 모든 항공편에 공통으로 붙여 "Google Flights에서 확인/예약"할 수 있게 한다.
-        flights_url = data.get("search_metadata", {}).get("google_flights_url")
+        # 항공편별 개별 예약 링크는 departure_token/booking_token을 이용한
+        # 별도 2~3단계 요청이 필요해 현재 단일 요청 구조와는 맞지 않는다.
+        # SerpApi의 search_metadata.google_flights_url도 검색 조건에 따라
+        # 조회 조건이 반영되지 않은 일반 링크로 오는 경우가 있어(예:
+        # "https://www.google.com/travel/flights?hl=en"), 대신 출발지/도착지/
+        # 날짜로 직접 Google Flights 자연어 검색(q=) 링크를 만들어 항상
+        # 유효한 딥링크를 보장한다.
+        flights_url = (
+            "https://www.google.com/travel/flights?q="
+            + quote(f"Flights from {origin} to {destination} on {date}")
+        )
 
         parsed = []
         flights_data = data.get("best_flights", []) + data.get("other_flights", [])
@@ -175,11 +181,19 @@ async def fetch_hotels_async(client, destination, check_in, check_out) -> Tuple[
         for p in data.get("properties", []):
             if "rate_per_night" not in p:
                 continue
+            hotel_name = p.get("name", "Unknown Hotel")
+            # 공식 홈페이지 link가 없는 프로퍼티(특히 소규모/무브랜드 숙소)도
+            # 있어, 이 경우 Google Hotels 검색 링크로 대체해 항상 클릭 가능한
+            # 링크를 보장한다.
+            hotel_link = p.get("link") or (
+                "https://www.google.com/travel/hotels?q="
+                + quote(f"{hotel_name} {destination}")
+            )
             parsed.append({
-                "id": p.get("name", "Unknown Hotel"),
+                "id": hotel_name,
                 "price": p.get("rate_per_night", {}).get("lowest", "0"),
                 "rating": p.get("overall_rating", 3.0),
-                "link": p.get("link")
+                "link": hotel_link
             })
         return validate_hotels(parsed), None
     except httpx.HTTPStatusError as e:
