@@ -504,10 +504,26 @@ illustration_html = """<div style="text-align:center; margin: 0.5rem 0 0.75rem 0
 
 st.markdown(illustration_html, unsafe_allow_html=True)
 
-# --- 최상단: 출발지 + 예산 (항상 보이는 영역) ---
-origin = location_picker("출발지 (공항코드 또는 도시명)", "origin_text", "ICN")
-st.caption("예: ICN, 서울, Seoul 모두 입력 가능합니다. 🔍 버튼을 누르면 후보 목록이 팝업으로 뜹니다.")
+# --- 여행 경로 (출발지 + 도착지, 나란히 묶음) ---
+st.markdown("**✈️ 여행 경로**")
+route_col1, route_col2 = st.columns(2)
+with route_col1:
+    origin = location_picker("출발지", "origin_text", "ICN")
+with route_col2:
+    destination = location_picker("도착지", "destination_text", "NRT")
+st.caption("공항코드(ICN)나 도시명(서울)을 입력하거나, 🔍 버튼으로 후보 목록에서 골라보세요.")
 
+# --- 여행 일정 ---
+st.markdown("**📅 여행 일정**")
+if "start_date_input" not in st.session_state:
+    st.session_state["start_date_input"] = date.today()
+if "end_date_input" not in st.session_state:
+    st.session_state["end_date_input"] = date.today() + timedelta(days=7)
+
+date_col1, date_col2 = st.columns(2)
+start_date = date_col1.date_input("출발일", key="start_date_input")
+end_date = date_col2.date_input("귀국일", key="end_date_input")
+st.caption("ℹ️ 항공권은 왕복(출발일→귀국일) 예상 요금으로 조회됩니다. 실제 예약 가능 여부·최종 가격은 결과의 링크에서 다시 확인해주세요.")
 
 
 def _sync_budget_from_text():
@@ -529,15 +545,6 @@ if "budget_value" not in st.session_state:
 if "budget_text" not in st.session_state:
     st.session_state["budget_text"] = f"{st.session_state['budget_value']:,}"
 
-st.text_input(
-    "최대 예산 (원)",
-    key="budget_text",
-    on_change=_sync_budget_from_text,
-    help="숫자만 입력해도 자동으로 콤마(,)가 붙습니다. 최소 100,000원."
-)
-budget = st.session_state["budget_value"]
-st.caption(f"💰 {budget:,}원 ({format_korean_won(budget)})")
-
 if "pax_adults" not in st.session_state:
     st.session_state["pax_adults"] = 1
 if "pax_children" not in st.session_state:
@@ -551,33 +558,33 @@ if st.session_state["pax_children"] > 0:
 if st.session_state["pax_infants"] > 0:
     _pax_summary += f" · 유아 {st.session_state['pax_infants']}명"
 
-with st.popover(f"👤 {_pax_summary}", use_container_width=True):
-    adults = st.number_input("성인", min_value=1, step=1, key="pax_adults")
-    children = st.number_input("소아 (만 2~11세)", min_value=0, step=1, key="pax_children")
-    infants = st.number_input("유아 (만 2세 미만)", min_value=0, step=1, key="pax_infants")
-    if infants > adults:
-        st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
-    if children > 0:
-        st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
+# --- 예산 · 인원 (나란히 묶음) ---
+st.markdown("**💰 예산 · 인원**")
+budget_col1, budget_col2 = st.columns([2, 1])
+with budget_col1:
+    st.text_input(
+        "최대 예산 (원)",
+        key="budget_text",
+        on_change=_sync_budget_from_text,
+        help="숫자만 입력해도 자동으로 콤마(,)가 붙습니다. 최소 100,000원."
+    )
+with budget_col2:
+    st.write("")  # 라벨 높이만큼 살짝 내려서 버튼 줄 맞추기
+    with st.popover(f"👤 {_pax_summary}", use_container_width=True):
+        adults = st.number_input("성인", min_value=1, step=1, key="pax_adults")
+        children = st.number_input("소아 (만 2~11세)", min_value=0, step=1, key="pax_children")
+        infants = st.number_input("유아 (만 2세 미만)", min_value=0, step=1, key="pax_infants")
+        if infants > adults:
+            st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
+        if children > 0:
+            st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
+
+budget = st.session_state["budget_value"]
+st.caption(f"💰 {budget:,}원 ({format_korean_won(budget)}) · 👤 {_pax_summary}")
 
 st.divider()
 
-# --- 세부 검색 조건 ---
-with st.expander("🔍 세부 검색 조건 및 가중치 설정", expanded=True):
-    destination = location_picker("도착지 (공항코드 또는 도시명)", "destination_text", "NRT")
-    st.caption("예: NRT, 도쿄, Tokyo 모두 입력 가능합니다. 🔍 버튼을 누르면 후보 목록이 팝업으로 뜹니다.")
-
-    if "start_date_input" not in st.session_state:
-        st.session_state["start_date_input"] = date.today()
-    if "end_date_input" not in st.session_state:
-        st.session_state["end_date_input"] = date.today() + timedelta(days=7)
-
-    col_date1, col_date2 = st.columns(2)
-    start_date = col_date1.date_input("출발일", key="start_date_input")
-    end_date = col_date2.date_input("귀국일", key="end_date_input")
-    st.caption("ℹ️ 항공권은 왕복(출발일→귀국일) 기준으로 조회됩니다. 표시되는 가격은 Google Flights의 왕복 예상 요금이며, 실제 예약 가능 여부와 최종 가격은 링크에서 다시 확인해주세요.")
-
-    st.divider()
+with st.expander("⚙️ 가중치 설정 (선택)", expanded=False):
     st.caption("ℹ️ '예산 소진율 비중'을 높일수록 예산 한도 내에서 총비용이 예산에 최대한 가깝게 나오도록 우선순위를 둡니다(예산 초과는 항상 차단됩니다).")
     w_budget = st.slider("예산 소진율 비중", 0.0, 1.0, 1.0)
     w_hotel = st.slider("숙박 품질 비중", 0.0, 1.0, 0.3)
