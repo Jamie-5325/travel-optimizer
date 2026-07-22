@@ -509,12 +509,47 @@ def _apply_explore_pick(d: dict):
 # 4. 모바일 최적화 Streamlit UI
 # ==========================================
 st.set_page_config(page_title="항공+숙박 최적화", layout="centered", initial_sidebar_state="collapsed")
-st.title("✈️ 예산은 그대로, 여행은 최고로")
-st.caption("항공권과 숙소, 정해진 예산 안에서 가장 완벽한 조합을 찾아드립니다.")
+
+st.markdown(
+    """
+    <div style="text-align:center; margin: 0.5rem 0 0.75rem 0;">
+        <svg viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg"
+             style="width:100%; max-width:360px; height:auto;">
+            <defs>
+                <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#EAF4F8"/>
+                    <stop offset="100%" stop-color="#F7EFE3"/>
+                </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="400" height="200" rx="24" fill="url(#skyGrad)"/>
+            <path d="M70,150 C150,60 250,50 330,70" fill="none" stroke="#8FB9C9"
+                  stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round"/>
+            <g transform="translate(48,150)">
+                <rect x="-24" y="-14" width="48" height="34" rx="6" fill="#E4784B"/>
+                <rect x="-9" y="-24" width="18" height="12" rx="3" fill="#C85F36"/>
+                <rect x="-24" y="-2" width="48" height="6" fill="#C85F36"/>
+            </g>
+            <g transform="translate(230,68) rotate(-18)">
+                <path d="M-16,-6 L16,0 L-16,6 L-6,0 Z" fill="#2E5E73"/>
+            </g>
+            <g transform="translate(335,68)">
+                <path d="M0,-16 C9,-16 16,-9 16,0 C16,11 0,26 0,26 C0,26 -16,11 -16,0 C-16,-9 -9,-16 0,-16 Z" fill="#3E7C8C"/>
+                <circle cx="0" cy="0" r="5.5" fill="#FFFFFF"/>
+            </g>
+        </svg>
+    </div>
+    <p style="text-align:center; font-size:1.25rem; font-weight:700; color:#2E5E73;
+              line-height:1.4; margin: 0 0 1rem 0;">
+        항공권과 숙소, 정해진 예산 안에서<br>가장 완벽한 조합을 찾아드립니다.
+    </p>
+    """,
+    unsafe_allow_html=True
+)
 
 # --- 최상단: 출발지 + 예산 (항상 보이는 영역) ---
 origin = location_picker("출발지 (공항코드 또는 도시명)", "origin_text", "ICN")
 st.caption("예: ICN, 서울, Seoul 모두 입력 가능합니다. 🔍 버튼을 누르면 후보 목록이 팝업으로 뜹니다.")
+
 
 
 def _sync_budget_from_text():
@@ -724,4 +759,3 @@ if st.button("최적 조합 검색", use_container_width=True):
                             st.json({"항공편": flight, "숙박": hotel})
                     else:
                         st.error("해당 예산으로 구성 가능한 조합이 없습니다.")
-
