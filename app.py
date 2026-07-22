@@ -582,14 +582,27 @@ st.text_input(
 budget = st.session_state["budget_value"]
 st.caption(f"💰 {budget:,}원 ({format_korean_won(budget)})")
 
-col_pax1, col_pax2, col_pax3 = st.columns(3)
-adults = col_pax1.number_input("성인", min_value=1, value=1, step=1)
-children = col_pax2.number_input("소아 (만 2~11세)", min_value=0, value=0, step=1)
-infants = col_pax3.number_input("유아 (만 2세 미만)", min_value=0, value=0, step=1)
-if infants > adults:
-    st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
-if children > 0:
-    st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
+if "pax_adults" not in st.session_state:
+    st.session_state["pax_adults"] = 1
+if "pax_children" not in st.session_state:
+    st.session_state["pax_children"] = 0
+if "pax_infants" not in st.session_state:
+    st.session_state["pax_infants"] = 0
+
+_pax_summary = f"성인 {st.session_state['pax_adults']}명"
+if st.session_state["pax_children"] > 0:
+    _pax_summary += f" · 소아 {st.session_state['pax_children']}명"
+if st.session_state["pax_infants"] > 0:
+    _pax_summary += f" · 유아 {st.session_state['pax_infants']}명"
+
+with st.popover(f"👤 {_pax_summary}", use_container_width=True):
+    adults = st.number_input("성인", min_value=1, step=1, key="pax_adults")
+    children = st.number_input("소아 (만 2~11세)", min_value=0, step=1, key="pax_children")
+    infants = st.number_input("유아 (만 2세 미만)", min_value=0, step=1, key="pax_infants")
+    if infants > adults:
+        st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
+    if children > 0:
+        st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
 
 st.divider()
 
