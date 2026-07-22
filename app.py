@@ -724,3 +724,4 @@ if st.button("최적 조합 검색", use_container_width=True):
                             st.json({"항공편": flight, "숙박": hotel})
                     else:
                         st.error("해당 예산으로 구성 가능한 조합이 없습니다.")
+
