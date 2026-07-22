@@ -2,6 +2,7 @@ import streamlit as st
 import asyncio
 import httpx
 import itertools
+import re
 from urllib.parse import quote
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Tuple
@@ -33,9 +34,9 @@ def clean_currency_string(v):
 # ==========================================
 class FlightModel(BaseModel):
     id: str = Field(description="항공편 고유 ID")
-    price: int = Field(gt=0, description="항공권 가격")
-    stops: int = Field(ge=0, description="경유 횟수")
-    duration: float = Field(gt=0.0, description="비행 시간")
+    price: int = Field(gt=0, description="왕복 항공권 예상 가격")
+    stops: int = Field(ge=0, description="출국편 경유 횟수")
+    duration: float = Field(gt=0.0, description="출국편 비행 시간")
     link: Optional[str] = Field(default=None, description="항공편 예약/조회 링크")
 
     @validator('price', pre=True)
@@ -96,22 +97,92 @@ except (KeyError, FileNotFoundError):
     SERPAPI_KEY = "로컬_테스트용_키를_여기에_입력"
 
 
-async def fetch_flights_async(client, origin, destination, date) -> Tuple[List[dict], Optional[str]]:
+@st.cache_data(ttl=60 * 60 * 24)  # 공항/도시 매핑은 자주 바뀌지 않으므로 24시간 캐시
+def resolve_flight_location(query: str, hl: str = "ko") -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    편도(One-way) 항공권을 조회한다.
-    참고: SerpApi google_flights 엔진은 'type' 파라미터 기본값이
-    1(왕복)이며, 왕복인 경우 return_date가 필수라 이 파라미터 없이 호출하면
-    API가 오류를 반환한다(기존 코드의 실질적 버그). 왕복 검색을 지원하려면
-    departure_token을 이용한 2단계 조회가 별도로 필요하므로, 여기서는
-    명시적으로 편도(type=2)로 고정해 단일 요청 구조를 유지한다.
+    출발지/도착지 입력값을 항공권 조회(departure_id/arrival_id)에 쓸 수 있는
+    값으로 변환한다.
+    - 3자리 영문 공항코드(예: ICN, NRT)는 그대로 사용
+    - 그 외 도시/국가명(예: 서울, Tokyo)은 SerpApi Google Flights Autocomplete
+      API(engine=google_flights_autocomplete)로 조회해, 해당 도시의 kgmid
+      (예: /m/0hsqf)를 사용한다. 도시 kgmid를 쓰면 그 도시의 모든 공항이
+      자동으로 포함되어 특정 공항 하나를 임의로 고르지 않아도 된다.
+
+    반환값: (resolved_id, 인식된 이름(표시용), 오류 메시지)
+    """
+    q = query.strip()
+    if not q:
+        return None, None, "출발지/도착지를 입력해주세요."
+
+    if re.fullmatch(r"[A-Za-z]{3}", q):
+        code = q.upper()
+        return code, code, None
+
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google_flights_autocomplete",
+        "q": q,
+        "hl": hl,
+        "api_key": SERPAPI_KEY
+    }
+
+    async def _fetch():
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=15.0)
+            response.raise_for_status()
+            return response.json()
+
+    try:
+        data = asyncio.run(_fetch())
+    except Exception as e:
+        return None, None, f"'{query}' 위치 조회 실패: {e}"
+
+    if "error" in data:
+        return None, None, f"'{query}' 위치 조회 오류: {data['error']}"
+
+    suggestions = data.get("suggestions", [])
+    if not suggestions:
+        return None, None, f"'{query}'에 해당하는 공항/도시를 찾을 수 없습니다."
+
+    # 도시 단위 결과를 우선한다(해당 도시의 모든 공항을 포함하는 kgmid 사용).
+    # 없으면 최상단 추천 결과를 그대로 사용한다.
+    chosen = next((s for s in suggestions if s.get("type") == "city" and s.get("id")), None)
+    chosen = chosen or suggestions[0]
+    resolved_id = chosen.get("id")
+    resolved_name = chosen.get("name", q)
+
+    if not resolved_id:
+        return None, None, f"'{query}'의 위치 코드를 확인할 수 없습니다."
+    return resolved_id, resolved_name, None
+
+
+async def fetch_flights_async(client, origin_id, destination_id, outbound_date, return_date, flights_link) -> Tuple[List[dict], Optional[str]]:
+    """
+    왕복(Round trip) 항공권을 조회한다.
+
+    참고: SerpApi google_flights 엔진은 초기 왕복 검색 결과(best_flights/
+    other_flights)에 담긴 'price'가 이미 Google Flights가 보여주는 왕복
+    예상 요금이다(Google Flights UI에서 출발 항공편을 고르기 전에 보이는
+    가격과 동일한 성격). 다만 이는 "예상" 가격이며, 실제로 특정 귀국편까지
+    확정한 확정 가격을 받으려면 이 결과의 departure_token으로 귀국편을
+    다시 조회하고, 그 결과의 booking_token으로 최종 예약 옵션을 조회하는
+    2~3단계 추가 요청이 필요하다(SerpApi 공식 문서 기준).
+    이 앱은 여러 항공편 x 여러 호텔 조합을 비교하는 최적화 도구라서,
+    후보 하나하나에 대해 추가 조회를 하면 API 호출 수가 매우 커진다.
+    따라서 여기서는 1단계 조회의 예상 왕복 가격만 사용하고, 실제 예약
+    가능 여부/최종 가격은 Google Flights 링크에서 직접 확인하도록 안내한다.
+
+    origin_id/destination_id는 resolve_flight_location()이 반환한, 이미
+    공항코드 또는 kgmid로 변환된 값이어야 한다.
     """
     url = "https://serpapi.com/search"
     params = {
         "engine": "google_flights",
-        "departure_id": origin,
-        "arrival_id": destination,
-        "outbound_date": date,
-        "type": "2",  # 편도. 왕복(1)은 return_date 필수 + departure_token 2단계 조회 필요
+        "departure_id": origin_id,
+        "arrival_id": destination_id,
+        "outbound_date": outbound_date,
+        "return_date": return_date,
+        "type": "1",  # 왕복
         "currency": "KRW",
         "hl": "ko",
         "api_key": SERPAPI_KEY
@@ -124,18 +195,6 @@ async def fetch_flights_async(client, origin, destination, date) -> Tuple[List[d
         if "error" in data:
             return [], f"항공권 API 오류: {data['error']}"
 
-        # 항공편별 개별 예약 링크는 departure_token/booking_token을 이용한
-        # 별도 2~3단계 요청이 필요해 현재 단일 요청 구조와는 맞지 않는다.
-        # SerpApi의 search_metadata.google_flights_url도 검색 조건에 따라
-        # 조회 조건이 반영되지 않은 일반 링크로 오는 경우가 있어(예:
-        # "https://www.google.com/travel/flights?hl=en"), 대신 출발지/도착지/
-        # 날짜로 직접 Google Flights 자연어 검색(q=) 링크를 만들어 항상
-        # 유효한 딥링크를 보장한다.
-        flights_url = (
-            "https://www.google.com/travel/flights?q="
-            + quote(f"Flights from {origin} to {destination} on {date}")
-        )
-
         parsed = []
         flights_data = data.get("best_flights", []) + data.get("other_flights", [])
 
@@ -144,12 +203,15 @@ async def fetch_flights_async(client, origin, destination, date) -> Tuple[List[d
                 continue
             flight_info = f.get("flights", [{}])[0]
 
+            # 왕복 검색의 1단계 응답에는 출국편 정보만 담기므로(귀국편은
+            # departure_token으로 별도 조회해야 함), stops/duration은
+            # 출국편 기준 값이다. price만 Google이 제공하는 왕복 예상 가격.
             parsed.append({
                 "id": f"{flight_info.get('flight_number', 'Unknown')}_{flight_info.get('airline', 'Unknown')}",
                 "price": f.get("price", 0),
                 "stops": len(f.get("layovers", [])),
                 "duration": f.get("total_duration", 0) / 60.0,
-                "link": flights_url
+                "link": flights_link
             })
         return validate_flights(parsed), None
     except httpx.HTTPStatusError as e:
@@ -202,16 +264,18 @@ async def fetch_hotels_async(client, destination, check_in, check_out) -> Tuple[
         return [], f"숙박 조회 실패: {e}"
 
 
-async def fetch_all_data(origin, destination, check_in, check_out):
+async def fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, flights_link):
     async with httpx.AsyncClient() as client:
-        f_task = fetch_flights_async(client, origin, destination, check_in)
-        h_task = fetch_hotels_async(client, destination, check_in, check_out)
+        # check_in = 출국일(outbound_date), check_out = 귀국일(return_date) 겸
+        # 호텔 체크아웃일로 동일하게 사용한다(왕복 여행 = 숙박 기간과 동일).
+        f_task = fetch_flights_async(client, origin_id, destination_id, check_in, check_out, flights_link)
+        h_task = fetch_hotels_async(client, destination_query, check_in, check_out)
         return await asyncio.gather(f_task, h_task)
 
 
 @st.cache_data(ttl=3600)
-def get_cached_api_data(origin, destination, check_in, check_out):
-    return asyncio.run(fetch_all_data(origin, destination, check_in, check_out))
+def get_cached_api_data(origin_id, destination_id, destination_query, check_in, check_out, flights_link):
+    return asyncio.run(fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, flights_link))
 
 # ==========================================
 # 3. 최적화 알고리즘
@@ -223,13 +287,16 @@ def find_optimal_combination(flights, hotels, budget, weights):
     일반적인 '최저가 최적화'와는 반대 방향이므로, 의도한 설계인지 확인이
     필요하다(요청 시 부호를 반대로 바꿀 수 있음). 이번 수정에서는
     로직을 임의로 바꾸지 않고 그대로 유지했다.
+
+    hotels의 각 항목은 'total_price'(숙박 전체 기간 총액) 키를 포함해야
+    한다. 'price'는 1박 요금(표시용)이라 총비용 계산에는 쓰지 않는다.
     """
     w1, w2, w3 = weights
     best_combo = None
     max_score = -float('inf')
 
     for flight, hotel in itertools.product(flights, hotels):
-        total_price = flight['price'] + hotel['price']
+        total_price = flight['price'] + hotel['total_price']
         if total_price > budget:
             continue
 
@@ -253,13 +320,14 @@ st.title("✈️ 여행 예산 최적화")
 
 with st.expander("🔍 검색 조건 및 가중치 설정", expanded=True):
     col_loc1, col_loc2 = st.columns(2)
-    origin = col_loc1.text_input("출발지 (코드)", value="ICN")
-    destination = col_loc2.text_input("도착지 (코드)", value="NRT")
+    origin = col_loc1.text_input("출발지 (공항코드 또는 도시명)", value="ICN")
+    destination = col_loc2.text_input("도착지 (공항코드 또는 도시명)", value="NRT")
+    st.caption("예: ICN, 서울, Seoul 모두 입력 가능합니다.")
 
     col_date1, col_date2 = st.columns(2)
     start_date = col_date1.date_input("출발일")
-    end_date = col_date2.date_input("도착일")
-    st.caption("ℹ️ 항공권은 '출발일' 기준 편도로 조회되며, '도착일'은 숙박 체크아웃 날짜로만 사용됩니다.")
+    end_date = col_date2.date_input("귀국일")
+    st.caption("ℹ️ 항공권은 왕복(출발일→귀국일) 기준으로 조회됩니다. 표시되는 가격은 Google Flights의 왕복 예상 요금이며, 실제 예약 가능 여부와 최종 가격은 링크에서 다시 확인해주세요.")
 
     budget = st.number_input("최대 예산 (원)", min_value=100000, value=1000000, step=50000)
 
@@ -270,59 +338,90 @@ with st.expander("🔍 검색 조건 및 가중치 설정", expanded=True):
 
 if st.button("최적 조합 검색", use_container_width=True):
     if start_date >= end_date:
-        st.error("도착일은 출발일 이후여야 합니다.")
+        st.error("귀국일은 출발일 이후여야 합니다.")
     else:
-        with st.spinner("데이터 통신 및 최적화 계산 중..."):
-            d_start = start_date.strftime("%Y-%m-%d")
-            d_end = end_date.strftime("%Y-%m-%d")
+        with st.spinner("출발지/도착지 확인 중..."):
+            origin_id, origin_name, origin_err = resolve_flight_location(origin)
+            dest_id, dest_name, dest_err = resolve_flight_location(destination)
 
-            (flights, f_err), (hotels, h_err) = get_cached_api_data(origin, destination, d_start, d_end)
+        if origin_err or dest_err:
+            if origin_err:
+                st.error(f"출발지 인식 실패: {origin_err}")
+            if dest_err:
+                st.error(f"도착지 인식 실패: {dest_err}")
+        else:
+            st.caption(f"✓ 출발지: {origin_name} · 도착지: {dest_name}")
 
-            if f_err:
-                st.warning(f_err)
-            if h_err:
-                st.warning(h_err)
+            with st.spinner("데이터 통신 및 최적화 계산 중..."):
+                d_start = start_date.strftime("%Y-%m-%d")
+                d_end = end_date.strftime("%Y-%m-%d")
 
-            if not flights or not hotels:
-                st.error("조건을 충족하는 데이터가 없거나 API 응답에 실패했습니다.")
-            else:
-                result = find_optimal_combination(
-                    flights, hotels, budget, weights=(w_budget, w_hotel, w_flight)
+                # 항공편별 개별 예약 링크는 departure_token/booking_token을 이용한
+                # 별도 2~3단계 요청이 필요해 현재 단일 요청 구조와는 맞지 않는다.
+                # 대신 인식된 지명 + 왕복 날짜로 Google Flights 자연어 검색(q=)
+                # 링크를 만들어 항상 유효한 딥링크를 보장한다.
+                flights_link = (
+                    "https://www.google.com/travel/flights?q="
+                    + quote(f"Round trip flights from {origin_name} to {dest_name}, depart {d_start} return {d_end}")
                 )
 
-                if result:
-                    st.success(f"탐색 완료 (항공 {len(flights)}건, 숙박 {len(hotels)}건)")
+                (flights, f_err), (hotels, h_err) = get_cached_api_data(
+                    origin_id, dest_id, destination, d_start, d_end, flights_link
+                )
 
-                    col1, col2 = st.columns(2)
-                    col1.metric("총 소요 비용", f"{result['total_price']:,} 원")
-                    col2.metric("잔여 예산", f"{budget - result['total_price']:,} 원")
-                    st.metric("유틸리티 점수", f"{result['score']:.2f}")
+                if f_err:
+                    st.warning(f_err)
+                if h_err:
+                    st.warning(h_err)
 
-                    st.divider()
-                    flight = result['flight']
-                    hotel = result['hotel']
-
-                    link_col1, link_col2 = st.columns(2)
-
-                    with link_col1:
-                        st.markdown("**✈️ 추천 항공편**")
-                        st.write(f"{flight['id']}")
-                        st.write(f"{flight['price']:,}원 · 경유 {flight['stops']}회 · {flight['duration']:.1f}시간")
-                        if flight.get('link'):
-                            st.link_button("Google Flights에서 보기", flight['link'], use_container_width=True)
-                        else:
-                            st.caption("예약 링크를 찾을 수 없습니다.")
-
-                    with link_col2:
-                        st.markdown("**🏨 추천 숙소**")
-                        st.write(f"{hotel['id']}")
-                        st.write(f"{hotel['price']:,}원 · 평점 {hotel['rating']:.1f}")
-                        if hotel.get('link'):
-                            st.link_button("호텔 페이지에서 보기", hotel['link'], use_container_width=True)
-                        else:
-                            st.caption("예약 링크를 찾을 수 없습니다.")
-
-                    with st.expander("상세 데이터 (JSON)"):
-                        st.json({"항공편": flight, "숙박": hotel})
+                if not flights or not hotels:
+                    st.error("조건을 충족하는 데이터가 없거나 API 응답에 실패했습니다.")
                 else:
-                    st.error("해당 예산으로 구성 가능한 조합이 없습니다.")
+                    nights = (end_date - start_date).days
+                    # hotel['price']는 API가 주는 1박 요금이므로, 실제 예산과
+                    # 비교하려면 숙박 일수만큼 곱한 전체 숙박비가 필요하다.
+                    hotels_priced = [
+                        {**h, "price_per_night": h["price"], "total_price": h["price"] * nights}
+                        for h in hotels
+                    ]
+
+                    result = find_optimal_combination(
+                        flights, hotels_priced, budget, weights=(w_budget, w_hotel, w_flight)
+                    )
+
+                    if result:
+                        st.success(f"탐색 완료 (항공 {len(flights)}건, 숙박 {len(hotels)}건, {nights}박 기준)")
+
+                        col1, col2 = st.columns(2)
+                        col1.metric("총 소요 비용", f"{result['total_price']:,} 원")
+                        col2.metric("잔여 예산", f"{budget - result['total_price']:,} 원")
+                        st.metric("유틸리티 점수", f"{result['score']:.2f}")
+
+                        st.divider()
+                        flight = result['flight']
+                        hotel = result['hotel']
+
+                        link_col1, link_col2 = st.columns(2)
+
+                        with link_col1:
+                            st.markdown("**✈️ 추천 항공편 (왕복)**")
+                            st.write(f"{flight['id']}")
+                            st.write(f"왕복 {flight['price']:,}원 · 출국편 경유 {flight['stops']}회 · 출국편 비행 {flight['duration']:.1f}시간")
+                            if flight.get('link'):
+                                st.link_button("Google Flights에서 보기", flight['link'], use_container_width=True)
+                            else:
+                                st.caption("예약 링크를 찾을 수 없습니다.")
+
+                        with link_col2:
+                            st.markdown(f"**🏨 추천 숙소 ({nights}박)**")
+                            st.write(f"{hotel['id']}")
+                            st.write(f"1박 {hotel['price_per_night']:,}원 × {nights}박 = 총 {hotel['total_price']:,}원 · 평점 {hotel['rating']:.1f}")
+                            if hotel.get('link'):
+                                st.link_button("호텔 페이지에서 보기", hotel['link'], use_container_width=True)
+                            else:
+                                st.caption("예약 링크를 찾을 수 없습니다.")
+
+                        with st.expander("상세 데이터 (JSON)"):
+                            st.json({"항공편": flight, "숙박": hotel})
+                    else:
+                        st.error("해당 예산으로 구성 가능한 조합이 없습니다.")
