@@ -153,6 +153,16 @@ def _fetch_autocomplete_raw(query: str, hl: str = "ko") -> Tuple[List[dict], Opt
     return suggestions, None
 
 
+_AIRPORT_CODE_RE = re.compile(r"[A-Za-z]{3}")
+
+
+def _is_airport_code(q: str) -> bool:
+    """3자리 영문 공항코드(예: ICN, NRT) 형태인지 판별한다.
+    resolve_flight_location과 search_location_candidates가 동일 기준을
+    공유하도록 여기 한 곳에만 정의한다."""
+    return bool(_AIRPORT_CODE_RE.fullmatch(q))
+
+
 def resolve_flight_location(query: str, hl: str = "ko") -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     출발지/도착지 입력값을 항공권 조회(departure_id/arrival_id)에 쓸 수 있는
@@ -169,7 +179,7 @@ def resolve_flight_location(query: str, hl: str = "ko") -> Tuple[Optional[str], 
     if not q:
         return None, None, "출발지/도착지를 입력해주세요."
 
-    if re.fullmatch(r"[A-Za-z]{3}", q):
+    if _is_airport_code(q):
         code = q.upper()
         return code, code, None
 
@@ -200,7 +210,7 @@ def search_location_candidates(query: str, hl: str = "ko") -> Tuple[List[dict], 
     if not q:
         return [], "검색어를 입력해주세요."
 
-    if re.fullmatch(r"[A-Za-z]{3}", q):
+    if _is_airport_code(q):
         code = q.upper()
         return [{"id": code, "name": code, "type": "airport"}], None
 
@@ -223,6 +233,25 @@ def search_location_candidates(query: str, hl: str = "ko") -> Tuple[List[dict], 
             candidates.append({"id": s["id"], "name": s.get("name", q), "type": s.get("type", "region")})
 
     return candidates[:8], None
+
+
+def _parse_flight_record(f: dict, flights_link: str) -> Optional[dict]:
+    """google_flights 응답의 항공편 1건(raw dict)을 앱 내부 표현으로 변환한다.
+    'price' 필드가 없는 레코드(광고/불완전 데이터)는 None을 반환해 건너뛴다."""
+    if "price" not in f:
+        return None
+    flight_info = f.get("flights", [{}])[0]
+
+    # 왕복 검색의 1단계 응답에는 출국편 정보만 담기므로(귀국편은
+    # departure_token으로 별도 조회해야 함), stops/duration은
+    # 출국편 기준 값이다. price만 Google이 제공하는 왕복 예상 가격.
+    return {
+        "id": f"{flight_info.get('flight_number', 'Unknown')}_{flight_info.get('airline', 'Unknown')}",
+        "price": f.get("price", 0),
+        "stops": len(f.get("layovers", [])),
+        "duration": f.get("total_duration", 0) / 60.0,
+        "link": flights_link
+    }
 
 
 async def fetch_flights_async(client, origin_id, destination_id, outbound_date, return_date, adults, children, infants, flights_link) -> Tuple[List[dict], Optional[str]]:
@@ -267,29 +296,37 @@ async def fetch_flights_async(client, origin_id, destination_id, outbound_date, 
         if "error" in data:
             return [], f"항공권 API 오류: {data['error']}"
 
-        parsed = []
         flights_data = data.get("best_flights", []) + data.get("other_flights", [])
-
-        for f in flights_data:
-            if "price" not in f:
-                continue
-            flight_info = f.get("flights", [{}])[0]
-
-            # 왕복 검색의 1단계 응답에는 출국편 정보만 담기므로(귀국편은
-            # departure_token으로 별도 조회해야 함), stops/duration은
-            # 출국편 기준 값이다. price만 Google이 제공하는 왕복 예상 가격.
-            parsed.append({
-                "id": f"{flight_info.get('flight_number', 'Unknown')}_{flight_info.get('airline', 'Unknown')}",
-                "price": f.get("price", 0),
-                "stops": len(f.get("layovers", [])),
-                "duration": f.get("total_duration", 0) / 60.0,
-                "link": flights_link
-            })
+        parsed = [
+            record for f in flights_data
+            if (record := _parse_flight_record(f, flights_link)) is not None
+        ]
         return validate_flights(parsed), None
     except httpx.HTTPStatusError as e:
         return [], f"항공권 API 응답 오류 (HTTP {e.response.status_code})"
     except Exception as e:
         return [], f"항공권 조회 실패: {e}"
+
+
+def _parse_hotel_record(p: dict, destination: str) -> Optional[dict]:
+    """google_hotels 응답의 숙소 1건(raw dict)을 앱 내부 표현으로 변환한다.
+    'rate_per_night'가 없는 레코드는 None을 반환해 건너뛴다."""
+    if "rate_per_night" not in p:
+        return None
+    hotel_name = p.get("name", "Unknown Hotel")
+    # 공식 홈페이지 link가 없는 프로퍼티(특히 소규모/무브랜드 숙소)도
+    # 있어, 이 경우 Google Hotels 검색 링크로 대체해 항상 클릭 가능한
+    # 링크를 보장한다.
+    hotel_link = p.get("link") or (
+        "https://www.google.com/travel/hotels?q="
+        + quote(f"{hotel_name} {destination}")
+    )
+    return {
+        "id": hotel_name,
+        "price": p.get("rate_per_night", {}).get("lowest", "0"),
+        "rating": p.get("overall_rating", 3.0),
+        "link": hotel_link
+    }
 
 
 async def fetch_hotels_async(client, destination, check_in, check_out, adults, children) -> Tuple[List[dict], Optional[str]]:
@@ -317,24 +354,11 @@ async def fetch_hotels_async(client, destination, check_in, check_out, adults, c
         if "error" in data:
             return [], f"숙박 API 오류: {data['error']}"
 
-        parsed = []
-        for p in data.get("properties", []):
-            if "rate_per_night" not in p:
-                continue
-            hotel_name = p.get("name", "Unknown Hotel")
-            # 공식 홈페이지 link가 없는 프로퍼티(특히 소규모/무브랜드 숙소)도
-            # 있어, 이 경우 Google Hotels 검색 링크로 대체해 항상 클릭 가능한
-            # 링크를 보장한다.
-            hotel_link = p.get("link") or (
-                "https://www.google.com/travel/hotels?q="
-                + quote(f"{hotel_name} {destination}")
-            )
-            parsed.append({
-                "id": hotel_name,
-                "price": p.get("rate_per_night", {}).get("lowest", "0"),
-                "rating": p.get("overall_rating", 3.0),
-                "link": hotel_link
-            })
+        properties = data.get("properties", [])
+        parsed = [
+            record for p in properties
+            if (record := _parse_hotel_record(p, destination)) is not None
+        ]
         return validate_hotels(parsed), None
     except httpx.HTTPStatusError as e:
         return [], f"숙박 API 응답 오류 (HTTP {e.response.status_code})"
@@ -358,7 +382,9 @@ def get_cached_api_data(origin_id, destination_id, destination_query, check_in, 
 # ==========================================
 # 3. 최적화 알고리즘
 # ==========================================
-def find_optimal_combination(flights, hotels, budget, weights):
+def find_optimal_combination(
+    flights: List[dict], hotels: List[dict], budget: int, weights: Tuple[float, float, float]
+) -> Optional[dict]:
     """
     참고: w1(예산 소진율 비중)은 (총가격 / 예산) 비율에 곱해져
     '예산을 많이 쓸수록' 점수가 올라가는 구조다. 저렴한 조합을 우대하는
@@ -569,7 +595,7 @@ with budget_col1:
         help="숫자만 입력해도 자동으로 콤마(,)가 붙습니다. 최소 100,000원."
     )
 with budget_col2:
-    st.write("")  # 라벨 높이만큼 살짝 내려서 버튼 줄 맞추기
+    st.caption("인원")
     with st.popover(f"👤 {_pax_summary}", use_container_width=True):
         adults = st.number_input("성인", min_value=1, step=1, key="pax_adults")
         children = st.number_input("소아 (만 2~11세)", min_value=0, step=1, key="pax_children")
