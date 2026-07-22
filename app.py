@@ -456,6 +456,28 @@ def find_optimal_combination(flights, hotels, budget, weights):
 # ==========================================
 # 3-1. UI 헬퍼 (위치 팝업 선택 / 여행지 추천 적용)
 # ==========================================
+# 후보 목록 팝업에서 검색어가 비어 있을 때 기본으로 보여줄 글로벌 주요 도시.
+# id는 공항코드라 바로 3자리 코드 매칭 경로를 타서 추가 조회 없이 빠르다.
+MAJOR_CITIES = [
+    {"name": "서울", "id": "ICN"},
+    {"name": "도쿄", "id": "NRT"},
+    {"name": "오사카", "id": "KIX"},
+    {"name": "방콕", "id": "BKK"},
+    {"name": "싱가포르", "id": "SIN"},
+    {"name": "홍콩", "id": "HKG"},
+    {"name": "타이베이", "id": "TPE"},
+    {"name": "다낭", "id": "DAD"},
+    {"name": "파리", "id": "CDG"},
+    {"name": "런던", "id": "LHR"},
+    {"name": "로마", "id": "FCO"},
+    {"name": "바르셀로나", "id": "BCN"},
+    {"name": "뉴욕", "id": "JFK"},
+    {"name": "로스앤젤레스", "id": "LAX"},
+    {"name": "두바이", "id": "DXB"},
+    {"name": "시드니", "id": "SYD"},
+]
+
+
 def _set_location_value(state_key: str, value: str):
     """팝업 후보 버튼 클릭 시 콜백으로 호출되어, 텍스트 입력값을 갱신한다.
     콜백은 스크립트가 다시 실행되기 전에 처리되므로, 이미 렌더링된 위젯의
@@ -465,7 +487,9 @@ def _set_location_value(state_key: str, value: str):
 
 def location_picker(label: str, state_key: str, default: str) -> str:
     """텍스트 입력 + '후보 목록 보기' 팝업으로 출발지/도착지를 고르는 위젯.
-    팝업 안에서 항목을 클릭하면 입력창 값이 바로 그 항목으로 바뀐다."""
+    입력창이 비어 있으면 글로벌 주요 도시 목록을, 검색어가 있으면 자동완성
+    검색 결과를 보여준다. 팝업 안에서 항목을 클릭하면 입력창 값이 바로 그
+    항목으로 바뀐다."""
     if state_key not in st.session_state:
         st.session_state[state_key] = default
 
@@ -474,7 +498,15 @@ def location_picker(label: str, state_key: str, default: str) -> str:
     with st.popover("🔍 후보 목록 보기", use_container_width=True, key=f"{state_key}_popover"):
         query = st.session_state.get(state_key, "")
         if not query.strip():
-            st.caption("입력창에 검색어를 먼저 입력해주세요.")
+            st.caption("🌍 글로벌 주요 도시")
+            for c in MAJOR_CITIES:
+                st.button(
+                    f"🏙️ {c['name']} ({c['id']})",
+                    key=f"{state_key}_major_{c['id']}",
+                    use_container_width=True,
+                    on_click=_set_location_value,
+                    args=(state_key, c["id"])
+                )
         else:
             candidates, err = search_location_candidates(query)
             if err:
