@@ -3,6 +3,7 @@ import asyncio
 import httpx
 import itertools
 import re
+from datetime import date, timedelta, datetime
 from urllib.parse import quote
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Tuple
@@ -120,6 +121,38 @@ except (KeyError, FileNotFoundError):
 
 
 @st.cache_data(ttl=60 * 60 * 24)  # 공항/도시 매핑은 자주 바뀌지 않으므로 24시간 캐시
+def _fetch_autocomplete_raw(query: str, hl: str = "ko") -> Tuple[List[dict], Optional[str]]:
+    """SerpApi Google Flights Autocomplete의 원본 suggestions 목록을 가져온다.
+    resolve_flight_location(단일 픽)과 search_location_candidates(여러 후보 리스트)가
+    이 함수를 공유해서 쓴다."""
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google_flights_autocomplete",
+        "q": query,
+        "hl": hl,
+        "api_key": SERPAPI_KEY
+    }
+
+    async def _fetch():
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=15.0)
+            response.raise_for_status()
+            return response.json()
+
+    try:
+        data = asyncio.run(_fetch())
+    except Exception as e:
+        return [], f"'{query}' 위치 조회 실패: {e}"
+
+    if "error" in data:
+        return [], f"'{query}' 위치 조회 오류: {data['error']}"
+
+    suggestions = data.get("suggestions", [])
+    if not suggestions:
+        return [], f"'{query}'에 해당하는 공항/도시를 찾을 수 없습니다."
+    return suggestions, None
+
+
 def resolve_flight_location(query: str, hl: str = "ko") -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     출발지/도착지 입력값을 항공권 조회(departure_id/arrival_id)에 쓸 수 있는
@@ -140,31 +173,9 @@ def resolve_flight_location(query: str, hl: str = "ko") -> Tuple[Optional[str], 
         code = q.upper()
         return code, code, None
 
-    url = "https://serpapi.com/search"
-    params = {
-        "engine": "google_flights_autocomplete",
-        "q": q,
-        "hl": hl,
-        "api_key": SERPAPI_KEY
-    }
-
-    async def _fetch():
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=15.0)
-            response.raise_for_status()
-            return response.json()
-
-    try:
-        data = asyncio.run(_fetch())
-    except Exception as e:
-        return None, None, f"'{query}' 위치 조회 실패: {e}"
-
-    if "error" in data:
-        return None, None, f"'{query}' 위치 조회 오류: {data['error']}"
-
-    suggestions = data.get("suggestions", [])
-    if not suggestions:
-        return None, None, f"'{query}'에 해당하는 공항/도시를 찾을 수 없습니다."
+    suggestions, err = _fetch_autocomplete_raw(q, hl)
+    if err:
+        return None, None, err
 
     # 도시 단위 결과를 우선한다(해당 도시의 모든 공항을 포함하는 kgmid 사용).
     # 없으면 최상단 추천 결과를 그대로 사용한다.
@@ -176,6 +187,42 @@ def resolve_flight_location(query: str, hl: str = "ko") -> Tuple[Optional[str], 
     if not resolved_id:
         return None, None, f"'{query}'의 위치 코드를 확인할 수 없습니다."
     return resolved_id, resolved_name, None
+
+
+def search_location_candidates(query: str, hl: str = "ko") -> Tuple[List[dict], Optional[str]]:
+    """
+    출발지/도착지 입력창 옆 '후보 목록' 팝업에 쓸 다중 후보 리스트를 반환한다.
+    resolve_flight_location과 달리 하나로 좁히지 않고, 도시 단위 결과와 그
+    하위 공항들을 모두 펼쳐서 사용자가 직접 고를 수 있게 한다.
+    각 후보는 {"id", "name", "type"} 딕셔너리.
+    """
+    q = query.strip()
+    if not q:
+        return [], "검색어를 입력해주세요."
+
+    if re.fullmatch(r"[A-Za-z]{3}", q):
+        code = q.upper()
+        return [{"id": code, "name": code, "type": "airport"}], None
+
+    suggestions, err = _fetch_autocomplete_raw(q, hl)
+    if err:
+        return [], err
+
+    candidates = []
+    for s in suggestions:
+        if s.get("type") == "city" and s.get("id"):
+            candidates.append({"id": s["id"], "name": s.get("name", q), "type": "city"})
+            for a in s.get("airports", []):
+                if a.get("id"):
+                    candidates.append({
+                        "id": a["id"],
+                        "name": f"{a.get('name', a['id'])} ({a['id']})",
+                        "type": "airport"
+                    })
+        elif s.get("id"):
+            candidates.append({"id": s["id"], "name": s.get("name", q), "type": s.get("type", "region")})
+
+    return candidates[:8], None
 
 
 async def fetch_flights_async(client, origin_id, destination_id, outbound_date, return_date, adults, children, infants, flights_link) -> Tuple[List[dict], Optional[str]]:
@@ -305,6 +352,64 @@ async def fetch_all_data(origin_id, destination_id, destination_query, check_in,
 
 
 @st.cache_data(ttl=3600)
+def get_explore_destinations(origin_id: str, travel_duration: str, month: int = 0):
+    """
+    출발지와 여행 기간만으로 인기 여행지 후보(도시 + 예상 날짜 + 가격)를
+    가져온다. SerpApi의 google_travel_explore 엔진(Google Flights 홈의
+    'Explore' 지도 기능과 동일)을 사용한다.
+
+    참고: 응답의 'hotel_price'가 1박 기준인지 숙박 전체 기간 기준인지
+    SerpApi 공식 문서에 명시돼 있지 않다. 이 앱은 필드명 그대로
+    "숙박 전체 예상 비용"으로 간주해 항공가와 합산하므로, 실제 총비용과
+    차이가 있을 수 있다.
+    """
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google_travel_explore",
+        "departure_id": origin_id,
+        "travel_duration": travel_duration,
+        "month": month,
+        "type": "1",  # 왕복
+        "currency": "KRW",
+        "hl": "ko",
+        "gl": "kr",
+        "api_key": SERPAPI_KEY
+    }
+    try:
+        response = httpx.get(url, params=params, timeout=20.0)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        return [], f"여행지 추천 조회 실패: {e}"
+
+    if "error" in data:
+        return [], f"여행지 추천 조회 오류: {data['error']}"
+
+    destinations = data.get("destinations", [])
+    if not destinations:
+        return [], "추천할 만한 여행지를 찾지 못했습니다. 기간을 바꿔서 다시 시도해보세요."
+
+    parsed = []
+    for d in destinations:
+        flight_price = d.get("flight_price")
+        hotel_price = d.get("hotel_price")
+        if flight_price is None or hotel_price is None:
+            continue
+        parsed.append({
+            "name": d.get("name", "알 수 없음"),
+            "country": d.get("country", ""),
+            "airport_code": d.get("destination_airport", {}).get("code"),
+            "start_date": d.get("start_date"),
+            "end_date": d.get("end_date"),
+            "flight_price": int(flight_price),
+            "hotel_price": int(hotel_price),
+            "total_price": int(flight_price) + int(hotel_price),
+            "link": d.get("link"),
+        })
+    return parsed, None
+
+
+@st.cache_data(ttl=3600)
 def get_cached_api_data(origin_id, destination_id, destination_query, check_in, check_out, adults, children, infants, flights_link):
     return asyncio.run(fetch_all_data(origin_id, destination_id, destination_query, check_in, check_out, adults, children, infants, flights_link))
 
@@ -343,6 +448,63 @@ def find_optimal_combination(flights, hotels, budget, weights):
             }
     return best_combo
 
+
+# ==========================================
+# 3-1. UI 헬퍼 (위치 팝업 선택 / 여행지 추천 적용)
+# ==========================================
+def _set_location_value(state_key: str, value: str):
+    """팝업 후보 버튼 클릭 시 콜백으로 호출되어, 텍스트 입력값을 갱신한다.
+    콜백은 스크립트가 다시 실행되기 전에 처리되므로, 이미 렌더링된 위젯의
+    session_state를 직접 바꿔도 충돌 없이 안전하다."""
+    st.session_state[state_key] = value
+
+
+def location_picker(label: str, state_key: str, default: str) -> str:
+    """텍스트 입력 + '후보 목록 보기' 팝업으로 출발지/도착지를 고르는 위젯.
+    팝업 안에서 항목을 클릭하면 입력창 값이 바로 그 항목으로 바뀐다."""
+    if state_key not in st.session_state:
+        st.session_state[state_key] = default
+
+    st.text_input(label, key=state_key)
+
+    with st.popover("🔍 후보 목록 보기", use_container_width=True, key=f"{state_key}_popover"):
+        query = st.session_state.get(state_key, "")
+        if not query.strip():
+            st.caption("입력창에 검색어를 먼저 입력해주세요.")
+        else:
+            candidates, err = search_location_candidates(query)
+            if err:
+                st.caption(f"⚠️ {err}")
+            elif not candidates:
+                st.caption("일치하는 후보가 없습니다.")
+            else:
+                for c in candidates:
+                    badge = "🏙️" if c["type"] == "city" else ("✈️" if c["type"] == "airport" else "🌍")
+                    st.button(
+                        f"{badge} {c['name']}",
+                        key=f"{state_key}_pick_{c['id']}",
+                        use_container_width=True,
+                        on_click=_set_location_value,
+                        args=(state_key, c["name"])
+                    )
+
+    return st.session_state[state_key]
+
+
+def _apply_explore_pick(d: dict):
+    """'이 여행지로 검색하기' 버튼 콜백. 아래 세부 검색 조건의 도착지/날짜를
+    추천받은 값으로 채워 넣는다. 공항코드가 있으면 그걸 우선 사용해
+    도착지 재인식(autocomplete 호출)을 건너뛴다."""
+    st.session_state["destination_text"] = d.get("airport_code") or d.get("name", "")
+    try:
+        if d.get("start_date"):
+            st.session_state["start_date_input"] = datetime.strptime(d["start_date"], "%Y-%m-%d").date()
+        if d.get("end_date"):
+            st.session_state["end_date_input"] = datetime.strptime(d["end_date"], "%Y-%m-%d").date()
+    except ValueError:
+        pass
+
+
 # ==========================================
 # 4. 모바일 최적화 Streamlit UI
 # ==========================================
@@ -350,15 +512,112 @@ st.set_page_config(page_title="항공+숙박 최적화", layout="centered", init
 st.title("✈️ 예산은 그대로, 여행은 최고로")
 st.caption("항공권과 숙소, 정해진 예산 안에서 가장 완벽한 조합을 찾아드립니다.")
 
-with st.expander("🔍 검색 조건 및 가중치 설정", expanded=True):
-    col_loc1, col_loc2 = st.columns(2)
-    origin = col_loc1.text_input("출발지 (공항코드 또는 도시명)", value="ICN")
-    destination = col_loc2.text_input("도착지 (공항코드 또는 도시명)", value="NRT")
-    st.caption("예: ICN, 서울, Seoul 모두 입력 가능합니다.")
+# --- 최상단: 출발지 + 예산 (항상 보이는 영역) ---
+origin = location_picker("출발지 (공항코드 또는 도시명)", "origin_text", "ICN")
+st.caption("예: ICN, 서울, Seoul 모두 입력 가능합니다. 🔍 버튼을 누르면 후보 목록이 팝업으로 뜹니다.")
+
+
+def _sync_budget_from_text():
+    """입력창의 텍스트(콤마 포함 가능)를 정수로 변환해 실제 예산 값으로
+    저장하고, 입력창 표시값은 콤마가 포함된 형태로 다시 맞춰준다."""
+    raw = st.session_state.get("budget_text", "")
+    cleaned = raw.replace(",", "").replace("원", "").strip()
+    try:
+        value = int(cleaned) if cleaned else 100000
+    except ValueError:
+        value = st.session_state.get("budget_value", 1000000)
+    value = max(value, 100000)
+    st.session_state["budget_value"] = value
+    st.session_state["budget_text"] = f"{value:,}"
+
+
+if "budget_value" not in st.session_state:
+    st.session_state["budget_value"] = 1000000
+if "budget_text" not in st.session_state:
+    st.session_state["budget_text"] = f"{st.session_state['budget_value']:,}"
+
+st.text_input(
+    "최대 예산 (원)",
+    key="budget_text",
+    on_change=_sync_budget_from_text,
+    help="숫자만 입력해도 자동으로 콤마(,)가 붙습니다. 최소 100,000원."
+)
+budget = st.session_state["budget_value"]
+st.caption(f"💰 {budget:,}원 ({format_korean_won(budget)})")
+
+st.divider()
+
+# --- 예산으로 여행지 추천받기 (도착지를 아직 안 정했을 때) ---
+with st.expander("💡 예산으로 여행지 추천받기", expanded=False):
+    st.caption("도착지를 아직 못 정했다면, 출발지와 예산만으로 갈 수 있는 여행지와 일정을 먼저 추천받아보세요.")
+    duration_label = st.selectbox("여행 기간", ["주말", "1주일", "2주일"], index=1, key="explore_duration_label")
+    duration_map = {"주말": "1", "1주일": "2", "2주일": "3"}
+
+    if st.button("여행지 추천받기", use_container_width=True, key="explore_search_button"):
+        with st.spinner("출발지 확인 중..."):
+            explore_origin_id, explore_origin_name, explore_origin_err = resolve_flight_location(origin)
+
+        if explore_origin_err:
+            st.session_state["explore_results"] = None
+            st.error(f"출발지 인식 실패: {explore_origin_err}")
+        else:
+            with st.spinner(f"{explore_origin_name} 출발, 예산 안에서 갈 수 있는 여행지를 찾는 중..."):
+                destinations, explore_err = get_explore_destinations(explore_origin_id, duration_map[duration_label])
+
+            if explore_err:
+                st.warning(explore_err)
+
+            affordable = [d for d in destinations if d["total_price"] <= budget]
+            affordable.sort(key=lambda d: d["total_price"], reverse=True)  # 예산에 가장 가까운 순
+
+            st.session_state["explore_results"] = {
+                "origin_name": explore_origin_name,
+                "items": affordable[:6],
+            }
+
+    explore_results = st.session_state.get("explore_results")
+    if explore_results:
+        if not explore_results["items"]:
+            st.info("이 예산으로 갈 수 있는 여행지를 찾지 못했습니다. 예산을 늘리거나 여행 기간을 조정해보세요.")
+        else:
+            st.success(f"{explore_results['origin_name']} 출발 기준, 예산 안에서 {len(explore_results['items'])}곳을 찾았습니다.")
+            for i, d in enumerate(explore_results["items"]):
+                with st.container(border=True):
+                    st.markdown(f"**{d['name']}, {d['country']}**")
+                    st.write(
+                        f"{d['start_date']} ~ {d['end_date']} · "
+                        f"항공 {d['flight_price']:,}원 + 숙박(전체) {d['hotel_price']:,}원 "
+                        f"= 총 {d['total_price']:,}원"
+                    )
+                    pcol1, pcol2 = st.columns(2)
+                    with pcol1:
+                        if d.get("link"):
+                            st.link_button("Google 탐색에서 보기", d["link"], use_container_width=True)
+                    with pcol2:
+                        st.button(
+                            "이 여행지로 검색하기",
+                            key=f"explore_pick_{i}",
+                            use_container_width=True,
+                            on_click=_apply_explore_pick,
+                            args=(d,)
+                        )
+            st.caption("ℹ️ 가격은 Google이 제공하는 참고용 예상치입니다(숙박비는 전체 기간 기준으로 가정). 실제 예약 가능 여부와 정확한 금액은 아래 세부 검색에서 다시 확인해주세요.")
+
+st.divider()
+
+# --- 세부 검색 조건 ---
+with st.expander("🔍 세부 검색 조건 및 가중치 설정", expanded=True):
+    destination = location_picker("도착지 (공항코드 또는 도시명)", "destination_text", "NRT")
+    st.caption("예: NRT, 도쿄, Tokyo 모두 입력 가능합니다. 🔍 버튼을 누르면 후보 목록이 팝업으로 뜹니다.")
+
+    if "start_date_input" not in st.session_state:
+        st.session_state["start_date_input"] = date.today()
+    if "end_date_input" not in st.session_state:
+        st.session_state["end_date_input"] = date.today() + timedelta(days=7)
 
     col_date1, col_date2 = st.columns(2)
-    start_date = col_date1.date_input("출발일")
-    end_date = col_date2.date_input("귀국일")
+    start_date = col_date1.date_input("출발일", key="start_date_input")
+    end_date = col_date2.date_input("귀국일", key="end_date_input")
     st.caption("ℹ️ 항공권은 왕복(출발일→귀국일) 기준으로 조회됩니다. 표시되는 가격은 Google Flights의 왕복 예상 요금이며, 실제 예약 가능 여부와 최종 가격은 링크에서 다시 확인해주세요.")
 
     col_pax1, col_pax2, col_pax3 = st.columns(3)
@@ -369,33 +628,6 @@ with st.expander("🔍 검색 조건 및 가중치 설정", expanded=True):
         st.caption(f"ℹ️ 유아는 보호자(성인) 1명당 1명까지 동반할 수 있어, 조회 시 {adults}명까지만 반영됩니다.")
     if children > 0:
         st.caption("ℹ️ 소아 나이는 편의상 대표 나이(8세)로 계산됩니다. 정확한 나이별 요금은 예약 시 다시 확인해주세요.")
-
-    def _sync_budget_from_text():
-        """입력창의 텍스트(콤마 포함 가능)를 정수로 변환해 실제 예산 값으로
-        저장하고, 입력창 표시값은 콤마가 포함된 형태로 다시 맞춰준다."""
-        raw = st.session_state.get("budget_text", "")
-        cleaned = raw.replace(",", "").replace("원", "").strip()
-        try:
-            value = int(cleaned) if cleaned else 100000
-        except ValueError:
-            value = st.session_state.get("budget_value", 1000000)
-        value = max(value, 100000)
-        st.session_state["budget_value"] = value
-        st.session_state["budget_text"] = f"{value:,}"
-
-    if "budget_value" not in st.session_state:
-        st.session_state["budget_value"] = 1000000
-    if "budget_text" not in st.session_state:
-        st.session_state["budget_text"] = f"{st.session_state['budget_value']:,}"
-
-    st.text_input(
-        "최대 예산 (원)",
-        key="budget_text",
-        on_change=_sync_budget_from_text,
-        help="숫자만 입력해도 자동으로 콤마(,)가 붙습니다. 최소 100,000원."
-    )
-    budget = st.session_state["budget_value"]
-    st.caption(f"💰 {budget:,}원 ({format_korean_won(budget)})")
 
     st.divider()
     st.caption("ℹ️ '예산 소진율 비중'을 높일수록 예산 한도 내에서 총비용이 예산에 최대한 가깝게 나오도록 우선순위를 둡니다(예산 초과는 항상 차단됩니다).")
